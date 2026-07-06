@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Multi-provider LLM wrapper — credentials loaded exclusively from project DB config."""
 from __future__ import annotations
 
@@ -123,14 +139,90 @@ class LLMProvider:
             set_llm_cache(InMemoryCache())
 
         self.llm = self._initialize_llm()
+
+        # Load fallback provider chain from project config
+        self._fallback_configs: list[dict] = self._load_fallback_configs(project_id, project_cfg)
+
         logger.info(
-            "Initialized LLM: provider=%s model=%s project_id=%s",
+            "Initialized LLM: provider=%s model=%s project_id=%s fallbacks=%d",
             self.provider,
             self.model,
             self.project_id,
+            len(self._fallback_configs),
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _load_fallback_configs(self, project_id: Optional[str], primary_cfg: dict) -> list:
+        """
+        Load ordered fallback LLM configurations from the project config.
+
+        The project config may include an `llm_fallbacks` list:
+        [
+          {"provider": "anthropic", "model": "claude-3-haiku-20240307", "api_key": "..."},
+          {"provider": "ollama",    "model": "llama3.2"}
+        ]
+
+        Falls back gracefully — invalid fallback entries are skipped with a warning.
+        """
+        if not project_id:
+            return []
+        try:
+            from storage.auth_store import get_project_config
+            config = get_project_config(project_id) or {}
+            fallbacks = config.get("llm_fallbacks") or []
+            if not isinstance(fallbacks, list):
+                return []
+            valid = []
+            for fb in fallbacks:
+                if isinstance(fb, dict) and fb.get("provider") and fb.get("model"):
+                    valid.append(fb)
+                else:
+                    logger.debug("Skipping invalid fallback config: %s", fb)
+            return valid
+        except Exception as exc:
+            logger.debug("Could not load fallback LLM configs: %s", exc)
+            return []
+
+    def _build_fallback_llm(self, cfg: dict) -> Optional[BaseChatModel]:
+        """Build an LLM client from a fallback config dict."""
+        try:
+            fb_provider = (cfg.get("provider") or "").strip().lower()
+            fb_model = (cfg.get("model") or "").strip()
+            fb_api_key = cfg.get("api_key") or None
+            fb_base_url = cfg.get("base_url") or None
+            fb_temp = self._coerce_float(cfg.get("temperature"), self.temperature)
+            fb_max_tokens = self._coerce_int(cfg.get("max_tokens"), self.max_tokens)
+
+            if fb_provider in {"openai", "custom", "perplexity", "deepseek", "mistral", "cohere"}:
+                from langchain_openai import ChatOpenAI
+                kw: dict = {"model": fb_model, "temperature": fb_temp, "max_tokens": fb_max_tokens,
+                            "api_key": fb_api_key, "timeout": 60.0, "max_retries": 1}
+                if fb_base_url:
+                    kw["base_url"] = fb_base_url
+                return ChatOpenAI(**kw)
+            elif fb_provider == "anthropic":
+                from langchain_anthropic import ChatAnthropic
+                return ChatAnthropic(model=fb_model, temperature=fb_temp, max_tokens=fb_max_tokens,
+                                     api_key=fb_api_key, timeout=60.0, max_retries=1)
+            elif fb_provider in {"google", "google_gemini"}:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                return ChatGoogleGenerativeAI(model=fb_model, temperature=fb_temp,
+                                              max_tokens=fb_max_tokens, google_api_key=fb_api_key, timeout=60)
+            elif fb_provider == "groq":
+                from langchain_groq import ChatGroq
+                return ChatGroq(model=fb_model, temperature=fb_temp, max_tokens=fb_max_tokens, api_key=fb_api_key)
+            elif fb_provider == "ollama":
+                from langchain_ollama import ChatOllama
+                return ChatOllama(model=fb_model, temperature=fb_temp,
+                                  base_url=fb_base_url or "http://localhost:11434")
+            else:
+                logger.warning("Unsupported fallback provider: %s", fb_provider)
+                return None
+        except Exception as exc:
+            logger.warning("Failed to build fallback LLM (%s/%s): %s",
+                           cfg.get("provider"), cfg.get("model"), exc)
+            return None
 
     def _load_project_llm_config(self, project_id: Optional[str]) -> dict:
         if not project_id:
@@ -277,6 +369,42 @@ class LLMProvider:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def _invoke_single(
+        self,
+        llm: BaseChatModel,
+        provider_name: str,
+        model_name: str,
+        prompt: str,
+        system_message: Optional[str],
+        temperature: Optional[float],
+        json_mode: bool,
+    ) -> str:
+        """Invoke a specific LLM client and return the response string."""
+        messages = []
+        if system_message:
+            messages.append(SystemMessage(content=system_message))
+        messages.append(HumanMessage(content=prompt))
+
+        invoke_kwargs: dict = {}
+        if temperature is not None:
+            invoke_kwargs["temperature"] = temperature
+
+        if json_mode and provider_name in {
+            "openai", "custom", "perplexity", "deepseek", "mistral", "cohere", "hugging_face",
+        }:
+            invoke_kwargs["response_format"] = {"type": "json_object"}
+
+        start = time.time()
+        response = llm.invoke(messages, **invoke_kwargs)
+        response_text = _normalize_response_content(getattr(response, "content", response))
+        elapsed = time.time() - start
+        logger.debug("LLM response from %s/%s in %.2fs, %d chars",
+                     provider_name, model_name, elapsed, len(response_text))
+
+        if not response_text:
+            raise ValueError(f"Empty response from {provider_name}/{model_name}")
+        return response_text
+
     @retry_with_backoff(max_retries=3, base_delay=2.0, exceptions=(RateLimitError, ConnectionError))
     def invoke(
         self,
@@ -286,68 +414,74 @@ class LLMProvider:
         json_mode: bool = False,
         **kwargs,
     ) -> str:
-        """Invoke the LLM synchronously and return the response string."""
+        """
+        Invoke the LLM synchronously and return the response string.
+
+        If the primary provider fails (rate limit, network, auth) and fallback
+        providers are configured, each fallback is tried in order before raising.
+        """
+        logger.debug("LLM invoke: provider=%s model=%s json_mode=%s", self.provider, self.model, json_mode)
+
+        # --- Attempt primary provider ---
         try:
-            messages = []
-            if system_message:
-                messages.append(SystemMessage(content=system_message))
-            messages.append(HumanMessage(content=prompt))
-
-            invoke_kwargs: dict = {}
-            if temperature is not None:
-                invoke_kwargs["temperature"] = temperature
-
-            if json_mode and self.provider in {
-                "openai", "custom", "perplexity", "deepseek",
-                "mistral", "cohere", "hugging_face",
-            }:
-                invoke_kwargs["response_format"] = {"type": "json_object"}
-
-            logger.debug(
-                "LLM invoke: provider=%s model=%s json_mode=%s",
-                self.provider, self.model, json_mode,
+            return self._invoke_single(
+                self.llm, self.provider, self.model,
+                prompt, system_message, temperature, json_mode,
             )
-            start = time.time()
-            response = self.llm.invoke(messages, **invoke_kwargs)
-            response_text = _normalize_response_content(getattr(response, "content", response))
-            elapsed = time.time() - start
-            logger.debug("LLM response in %.2fs, %d chars", elapsed, len(response_text))
-
-            if not response_text:
-                raise ValueError("Empty response from LLM")
-
-            return response_text
 
         except ConnectionResetError as exc:
-            raise ConnectionError(f"Connection reset by {self.provider}: {exc}")
-
+            primary_error: Exception = ConnectionError(f"Connection reset by {self.provider}: {exc}")
         except OSError as exc:
             if "WinError 10054" in str(exc) or "connection" in str(exc).lower():
-                raise ConnectionError(f"Connection forcibly closed by {self.provider}: {exc}")
-            raise
-
+                primary_error = ConnectionError(f"Connection forcibly closed by {self.provider}: {exc}")
+            else:
+                raise
         except Exception as exc:
             error_msg = str(exc)
             lower_msg = error_msg.lower()
-
-            is_rate_limited = any(
-                token in lower_msg
-                for token in (
-                    "rate", "429", "503", "resource_exhausted",
-                    "quota", "unavailable", "high demand", "overloaded",
-                )
-            )
+            is_rate_limited = any(t in lower_msg for t in (
+                "rate", "429", "503", "resource_exhausted", "quota", "unavailable", "high demand", "overloaded",
+            ))
             if is_rate_limited:
                 logger.warning("Rate limit / quota exhaustion on %s/%s", self.provider, self.model)
-                raise RateLimitError(f"Rate limit / transient provider overload: {exc}")
-
-            if "connection" in lower_msg or "timeout" in lower_msg:
-                raise ConnectionError(f"Failed to connect to {self.provider}: {exc}")
-
-            if "auth" in lower_msg or "api key" in lower_msg or "401" in error_msg:
+                primary_error = RateLimitError(f"Rate limit / transient provider overload: {exc}")
+            elif "connection" in lower_msg or "timeout" in lower_msg:
+                primary_error = ConnectionError(f"Failed to connect to {self.provider}: {exc}")
+            elif "auth" in lower_msg or "api key" in lower_msg or "401" in error_msg:
                 raise ValueError(f"Authentication failed for {self.provider}: {exc}")
+            else:
+                raise
 
-            raise
+        # --- Try fallback providers ---
+        if self._fallback_configs:
+            logger.warning(
+                "[LLM Fallback] Primary provider %s/%s failed (%s). Trying %d fallback(s)…",
+                self.provider, self.model, primary_error, len(self._fallback_configs)
+            )
+            for i, fb_cfg in enumerate(self._fallback_configs, 1):
+                fb_provider = fb_cfg.get("provider", "unknown")
+                fb_model = fb_cfg.get("model", "unknown")
+                fb_llm = self._build_fallback_llm(fb_cfg)
+                if not fb_llm:
+                    continue
+                try:
+                    result = self._invoke_single(
+                        fb_llm, fb_provider, fb_model,
+                        prompt, system_message, temperature, json_mode,
+                    )
+                    logger.info(
+                        "[LLM Fallback] ✓ Fallback %d succeeded: %s/%s",
+                        i, fb_provider, fb_model,
+                    )
+                    return result
+                except Exception as fb_exc:
+                    logger.warning(
+                        "[LLM Fallback] Fallback %d failed (%s/%s): %s",
+                        i, fb_provider, fb_model, fb_exc,
+                    )
+
+        # All providers exhausted — raise the original error
+        raise primary_error
 
     async def ainvoke(
         self,

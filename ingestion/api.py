@@ -1,8 +1,24 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """FastAPI ingestion server for log entries and incidents."""
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Deque, Dict, Any, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import deque
 import sys
 import os
@@ -72,6 +88,285 @@ def _link_incident_to_telemetry_log(
         if stored_log:
             telemetry_repo.mark_incident_created(stored_log.log_id, incident_id)
             return
+
+# ---------------------------------------------------------------------------
+# API key validation helper
+# ---------------------------------------------------------------------------
+
+def _validate_api_key(
+    request: Request,
+    authorization: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Validate per-project API key from Authorization: Bearer <key> header.
+    Returns the matched project_id, or None if no API key auth is configured
+    (open ingestion).  Raises HTTP 401 if a key is provided but invalid.
+
+    API keys are stored in the project's DB config under:
+        project.llm (or) project-level config → api_keys: [{"key": "...", "label": "..."}]
+    """
+    if not authorization:
+        return None  # No auth header → open ingestion (existing behaviour)
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization header must use 'Bearer <key>' format")
+
+    token = authorization[len("Bearer "):].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="API key is empty")
+
+    try:
+        from storage.auth_store import list_projects, get_project_config
+        for project in list_projects():
+            project_id = project.get("id", "")
+            if not project_id:
+                continue
+            try:
+                config = get_project_config(project_id) or {}
+                api_keys = config.get("api_keys") or []
+                if isinstance(api_keys, list):
+                    for entry in api_keys:
+                        if isinstance(entry, dict) and entry.get("key") == token:
+                            logger.info("[Auth] API key matched project %s", project_id)
+                            return project_id
+                        elif isinstance(entry, str) and entry == token:
+                            return project_id
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("[Auth] API key validation error: %s", exc)
+
+    raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+# ---------------------------------------------------------------------------
+# Incident grouping helper
+# ---------------------------------------------------------------------------
+
+def _auto_group_incident(
+    repo,
+    db,
+    new_incident,
+    error_title: str,
+    app_name: str,
+    fingerprint: str,
+    lookback_hours: int = 48,
+) -> None:
+    """
+    Attempt to assign the new incident to an existing incident group.
+
+    Groups incidents by app_name + error type prefix (first 60 chars of error_title)
+    within the last `lookback_hours`.  If an open primary incident exists in that
+    group, set `incident_group_id` on the new incident.  Otherwise mark it as the
+    new primary.
+    """
+    try:
+        from storage.database import Incident
+        from sqlalchemy import and_
+        cutoff = datetime.utcnow() - timedelta(hours=lookback_hours)
+        group_prefix = error_title[:60]
+
+        # Find recent incidents with same app + similar title
+        candidates = (
+            db.query(Incident)
+            .filter(
+                and_(
+                    Incident.app_name == app_name,
+                    Incident.error_title.like(f"{group_prefix}%"),
+                    Incident.created_at >= cutoff,
+                    Incident.incident_id != new_incident.incident_id,
+                )
+            )
+            .order_by(Incident.created_at.asc())
+            .limit(10)
+            .all()
+        )
+
+        if not candidates:
+            # This is the primary for a new group — point to itself
+            repo.update(new_incident.incident_id,
+                        incident_group_id=new_incident.incident_id,
+                        is_primary_incident=True)
+            return
+
+        # Find existing primary: an incident whose group_id equals its own id
+        primary = next(
+            (c for c in candidates
+             if c.incident_group_id and c.incident_group_id == c.incident_id),
+            None,
+        )
+        if not primary:
+            # Promote oldest candidate to primary and make it self-referential
+            oldest = candidates[0]
+            db.query(Incident).filter(Incident.incident_id == oldest.incident_id).update(
+                {"incident_group_id": oldest.incident_id, "is_primary_incident": True}
+            )
+            db.flush()
+            primary = oldest
+
+        group_id = primary.incident_id
+        repo.update(new_incident.incident_id,
+                    incident_group_id=group_id,
+                    is_primary_incident=False)
+        logger.info("[Grouping] Incident %s grouped under primary %s",
+                    new_incident.incident_id, group_id)
+        db.commit()
+
+    except Exception as exc:
+        logger.debug("[Grouping] Auto-group failed (non-critical): %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Shared per-incident OTLP processing helper
+# ---------------------------------------------------------------------------
+
+def _process_single_otlp_incident(
+    incident_data,
+    repo,
+    db,
+    background_tasks: BackgroundTasks,
+    apply_grouping: bool = True,
+    apply_recurring_check: bool = True,
+) -> dict:
+    """
+    Process one incident extracted from an OTLP payload.
+
+    Shared by both ``ingest_v1_logs`` and ``ingest_otlp`` to eliminate
+    the ~60-line inner-loop that was duplicated verbatim between those two
+    endpoints.
+
+    Returns a dict with keys:
+      - ``status``: ``"duplicate"`` | ``"created"`` | ``"failed"``
+      - ``incident_id`` (on success)
+      - ``severity``     (on success)
+      - ``app_name``     (on success)
+      - ``error_title``  (on success)
+      - ``recurring``    (on success, bool)
+      - ``error``        (on failure)
+    """
+    try:
+        fingerprint = deduplicate_error(
+            error_title=incident_data.error_title,
+            stack_trace=incident_data.stack_trace,
+            app_name=incident_data.app_name,
+        )
+
+        # Deduplication check
+        existing = repo.get_by_fingerprint(fingerprint)
+        if existing:
+            existing.occurrence_count += 1
+            existing.last_occurrence_at = datetime.utcnow()
+            existing.updated_at = datetime.utcnow()
+            db.commit()
+            return {
+                "status": "duplicate",
+                "incident_id": existing.incident_id,
+                "occurrence_count": existing.occurrence_count,
+            }
+
+        # Severity resolution
+        if incident_data.severity:
+            from storage.models import Severity
+            severity_enum = Severity[incident_data.severity]
+            severity = severity_enum.value
+            logger.info("Using severity from OTLP: %s", severity)
+        else:
+            severity = analyze_severity(
+                error_title=incident_data.error_title,
+                error_description=incident_data.error_description,
+                stack_trace=incident_data.stack_trace,
+                environment=incident_data.environment,
+            )
+            logger.info("Analyzed severity (no OTLP severity provided): %s", severity)
+
+        new_incident = repo.create(
+            incident=incident_data,
+            error_fingerprint=fingerprint,
+            severity=severity,
+        )
+
+        # Optional post-creation enrichment
+        is_recurring = False
+        if apply_grouping:
+            _auto_group_incident(repo, db, new_incident,
+                                 incident_data.error_title,
+                                 incident_data.app_name, fingerprint)
+        if apply_recurring_check:
+            is_recurring = _check_recurring_pattern(
+                incident_data.app_name, incident_data.error_title
+            )
+            if is_recurring:
+                logger.warning(
+                    "[Recurring] Incident %s flagged as recurring for app=%s",
+                    new_incident.incident_id, incident_data.app_name,
+                )
+                existing_meta = new_incident.incident_metadata or {}
+                existing_meta["recurring_pattern"] = True
+                repo.update(new_incident.incident_id, incident_metadata=existing_meta)
+
+        # Trigger workflow
+        if settings.auto_fix_enabled:
+            repo.update(
+                new_incident.incident_id,
+                status=IncidentStatus.ANALYZING.value,
+                current_workflow_node="assess_severity",
+            )
+            logger.info("Triggering workflow for OTLP incident %s", new_incident.incident_id)
+            background_tasks.add_task(process_incident_workflow, new_incident.incident_id)
+
+        return {
+            "status": "created",
+            "incident_id": new_incident.incident_id,
+            "severity": severity,
+            "app_name": new_incident.app_name,
+            "error_title": new_incident.error_title[:100],
+            "recurring": is_recurring,
+        }
+
+    except Exception as exc:
+        logger.error("Failed to process OTLP incident: %s", exc, exc_info=True)
+        return {
+            "status": "failed",
+            "error_title": (incident_data.error_title or "")[:100],
+            "error": str(exc),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Recurring pattern detection helper
+# ---------------------------------------------------------------------------
+
+def _check_recurring_pattern(
+    app_name: str,
+    error_title: str,
+    threshold: int = 3,
+    window_days: int = 7,
+) -> bool:
+    """
+    Return True if the same error type has appeared `threshold`+ times in the last
+    `window_days` days, indicating a recurring pattern that previous fixes may not
+    have resolved.
+    """
+    try:
+        from storage.database import Incident
+        from storage.database import get_session
+        cutoff = datetime.utcnow() - timedelta(days=window_days)
+        group_prefix = error_title[:60]
+        with get_session() as db:
+            count = (
+                db.query(Incident)
+                .filter(
+                    Incident.app_name == app_name,
+                    Incident.error_title.like(f"{group_prefix}%"),
+                    Incident.created_at >= cutoff,
+                )
+                .count()
+            )
+        return count >= threshold
+    except Exception as exc:
+        logger.debug("[Recurring] Pattern check failed (non-critical): %s", exc)
+        return False
+
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -449,33 +744,131 @@ async def ingest_log(incident: IncidentCreate, background_tasks: BackgroundTasks
 
 # Standard OTLP v1 endpoints
 
-@app.post("/v1/logs")
-async def ingest_v1_logs(payload: dict, background_tasks: BackgroundTasks):
+@app.post("/v1/events")
+async def ingest_ci_cd_events(
+    payload: dict,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
     """
-    Standard OTLP v1 logs endpoint.
-    
-    Accepts OTLP/JSON log data according to OpenTelemetry specification.
-    This is the standard endpoint that OpenTelemetry SDKs and collectors use.
-    
-    Expected payload structure:
+    CI/CD event ingestion endpoint (GitHub Actions, Jenkins, GitLab CI, etc.).
+
+    Accepts a structured JSON event and converts it to a Prism incident.
+
+    Expected payload:
     {
-      "resourceLogs": [{
-        "resource": {"attributes": [...]},
-        "scopeLogs": [{
-          "scope": {"name": "..."},
-          "logRecords": [...]
-        }]
-      }]
+      "source": "github-actions",
+      "workflow": "deploy.yml",
+      "repo":    "org/repo",
+      "branch":  "main",
+      "commit_sha": "abc123",
+      "environment": "production",
+      "error": "Test failure: NullPointerException in OrderService",
+      "stack_trace": "...",
+      "severity": "HIGH"
     }
     """
+    project_id = _validate_api_key(request, authorization)
+
     try:
-        logger.info("="*80)
-        logger.info("RECEIVED OTLP v1 LOGS REQUEST")
-        logger.info("="*80)
-        logger.info("Full OTLP Payload:")
-        logger.info(json.dumps(payload, indent=2))
-        logger.info("="*80)
-        
+        source = payload.get("source") or "ci-cd"
+        repo_name = payload.get("repo") or payload.get("repository") or "unknown"
+        workflow = payload.get("workflow") or payload.get("job") or "unknown"
+        branch = payload.get("branch") or "unknown"
+        commit_sha = payload.get("commit_sha") or payload.get("commit") or ""
+        environment = payload.get("environment") or "ci"
+        error_msg = payload.get("error") or payload.get("message") or "CI/CD pipeline failure"
+        stack_trace = payload.get("stack_trace") or payload.get("stacktrace") or ""
+        severity = (payload.get("severity") or "HIGH").upper()
+        app_name = payload.get("app_name") or repo_name.split("/")[-1] if "/" in repo_name else repo_name
+
+        # Build a structured metadata dict similar to OTLP
+        metadata = {
+            "source": source,
+            "ci_workflow": workflow,
+            "ci_branch": branch,
+            "ci_commit": commit_sha,
+            "repo": repo_name,
+            "custom_attributes": {
+                "github.repo": repo_name,
+                "ci.source": source,
+                "ci.workflow": workflow,
+                "ci.branch": branch,
+                "ci.commit": commit_sha,
+            }
+        }
+        if project_id:
+            metadata["project_id"] = project_id
+
+        from storage.models import IncidentCreate
+        incident_data = IncidentCreate(
+            app_name=app_name,
+            environment=environment,
+            error_title=f"[{source.upper()}] {error_msg[:150]}",
+            error_description=f"Source: {source} | Workflow: {workflow} | Branch: {branch} | Commit: {commit_sha}\n\n{error_msg}",
+            stack_trace=stack_trace,
+            raw_log=json.dumps(payload),
+            severity=severity,
+            metadata=metadata,
+        )
+
+        from utils.error_deduplication import deduplicate_error
+        fingerprint = deduplicate_error(
+            error_title=incident_data.error_title,
+            stack_trace=stack_trace,
+            app_name=app_name,
+        )
+
+        db = next(get_db())
+        repo = IncidentRepository(db)
+
+        existing = repo.get_by_fingerprint(fingerprint)
+        if existing:
+            existing.occurrence_count += 1
+            existing.last_occurrence_at = datetime.utcnow()
+            db.commit()
+            return {"status": "duplicate", "incident_id": existing.incident_id,
+                    "occurrence_count": existing.occurrence_count}
+
+        new_incident = repo.create(incident=incident_data, error_fingerprint=fingerprint, severity=severity)
+        _auto_group_incident(repo, db, new_incident, incident_data.error_title, app_name, fingerprint)
+
+        if settings.auto_fix_enabled:
+            repo.update(new_incident.incident_id, status=IncidentStatus.ANALYZING.value, current_workflow_node="assess_severity")
+            background_tasks.add_task(process_incident_workflow, new_incident.incident_id)
+
+        return {
+            "status": "created",
+            "incident_id": new_incident.incident_id,
+            "severity": severity,
+            "app_name": app_name,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("CI/CD event ingestion failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to ingest CI/CD event: {exc}")
+
+
+@app.post("/v1/logs")
+async def ingest_v1_logs(payload: dict, background_tasks: BackgroundTasks, request: Request, authorization: Optional[str] = Header(default=None)):
+    """
+    Standard OTLP v1 logs endpoint.
+
+    Accepts OTLP/JSON log data according to OpenTelemetry specification.
+    Supports optional per-project API key authentication via:
+      Authorization: Bearer <api_key>
+    """
+    # Optional API key auth — resolves project_id if a valid key is provided
+    _validate_api_key(request, authorization)
+
+    try:
+        resource_count = len(payload.get("resourceLogs", []))
+        logger.info("Received OTLP v1 logs request: %d resourceLogs", resource_count)
+        logger.debug("Full OTLP payload: %s", json.dumps(payload, indent=2))
+
         parser = OTLPParser()
         telemetry_repo, telemetry_logs = _persist_telemetry_logs(payload)
 
@@ -489,96 +882,41 @@ async def ingest_v1_logs(payload: dict, background_tasks: BackgroundTasks):
                 "stats": parser.stats
             }
         
-        # Get database session
         db = next(get_db())
         repo = IncidentRepository(db)
-        
-        # Process each incident
-        created_incidents = []
-        duplicate_incidents = []
-        failed_incidents = []
-        
-        for incident_data in incidents:
-            try:
-                # Check for duplicates
-                fingerprint = deduplicate_error(
-                    error_title=incident_data.error_title,
-                    stack_trace=incident_data.stack_trace,
-                    app_name=incident_data.app_name
-                )
-                
-                # Check if similar incident exists
-                existing_incident = repo.get_by_fingerprint(fingerprint)
-                if existing_incident:
-                    # Increment occurrence count
-                    existing_incident.occurrence_count += 1
-                    existing_incident.last_occurrence_at = datetime.utcnow()
-                    existing_incident.updated_at = datetime.utcnow()
-                    db.commit()
-                    
-                    duplicate_incidents.append({
-                        "incident_id": existing_incident.incident_id,
-                        "occurrence_count": existing_incident.occurrence_count
-                    })
-                    
-                    logger.info(f"Duplicate OTLP error for incident {existing_incident.incident_id}, occurrence: {existing_incident.occurrence_count}")
-                    continue
-                
-                # Use severity from OTLP parser if provided, otherwise analyze it
-                if incident_data.severity:
-                    from storage.models import Severity
-                    severity_enum = Severity[incident_data.severity]
-                    severity = severity_enum.value  # Convert enum to string for database
-                    logger.info(f"Using severity from OTLP: {severity} (from severityNumber in OTLP payload)")
-                else:
-                    severity = analyze_severity(
-                        error_title=incident_data.error_title,
-                        error_description=incident_data.error_description,
-                        stack_trace=incident_data.stack_trace,
-                        environment=incident_data.environment
-                    )
-                    logger.info(f"Analyzed severity (no OTLP severity provided): {severity}")
-                
-                # Create new incident
-                new_incident = repo.create(
-                    incident=incident_data,
-                    error_fingerprint=fingerprint,
-                    severity=severity
-                )
-                
-                created_incidents.append({
-                    "incident_id": new_incident.incident_id,
-                    "severity": severity,
-                    "app_name": new_incident.app_name,
-                    "error_title": new_incident.error_title[:100]
-                })
 
+        created_incidents, duplicate_incidents, failed_incidents = [], [], []
+
+        for incident_data in incidents:
+            result = _process_single_otlp_incident(
+                incident_data, repo, db, background_tasks,
+                apply_grouping=True, apply_recurring_check=True,
+            )
+            if result["status"] == "duplicate":
+                duplicate_incidents.append({
+                    "incident_id": result["incident_id"],
+                    "occurrence_count": result["occurrence_count"],
+                })
+            elif result["status"] == "created":
                 _link_incident_to_telemetry_log(
                     telemetry_repo=telemetry_repo,
                     telemetry_logs=telemetry_logs,
                     incident_data=incident_data,
-                    incident_id=new_incident.incident_id,
+                    incident_id=result["incident_id"],
                 )
-                
-                # Mark as analyzing immediately so status moves off DETECTED
-                # before the async workflow finishes bootstrapping.
-                if settings.auto_fix_enabled:
-                    repo.update(
-                        new_incident.incident_id,
-                        status=IncidentStatus.ANALYZING.value,
-                        current_workflow_node="assess_severity",
-                    )
-                    logger.info(f"Triggering workflow for OTLP incident {new_incident.incident_id}")
-                    background_tasks.add_task(process_incident_workflow, new_incident.incident_id)
-                
-            except Exception as e:
-                logger.error(f"Failed to process OTLP incident: {str(e)}", exc_info=True)
-                failed_incidents.append({
-                    "error_title": incident_data.error_title[:100],
-                    "error": str(e)
+                created_incidents.append({
+                    "incident_id": result["incident_id"],
+                    "severity": result["severity"],
+                    "app_name": result["app_name"],
+                    "error_title": result["error_title"],
+                    "recurring": result.get("recurring", False),
                 })
-        
-        # Build response
+            else:
+                failed_incidents.append({
+                    "error_title": result.get("error_title", ""),
+                    "error": result.get("error", "unknown error"),
+                })
+
         response = {
             "status": "success",
             "message": f"OTLP logs processed: {len(created_incidents)} new incidents, {len(duplicate_incidents)} duplicates",
@@ -587,21 +925,19 @@ async def ingest_v1_logs(payload: dict, background_tasks: BackgroundTasks):
                 "incidents_created": len(created_incidents),
                 "duplicates_found": len(duplicate_incidents),
                 "failed": len(failed_incidents),
-                "skipped_low_severity": parser.stats["skipped"]
+                "skipped_low_severity": parser.stats["skipped"],
             },
             "created_incidents": created_incidents,
-            "duplicate_incidents": duplicate_incidents
+            "duplicate_incidents": duplicate_incidents,
         }
-        
         if failed_incidents:
             response["failed_incidents"] = failed_incidents
-        
-        logger.info(f"OTLP v1 logs ingestion complete: {response['stats']}")
-        
+
+        logger.info("OTLP v1 logs ingestion complete: %s", response["stats"])
         return response
-        
+
     except Exception as e:
-        logger.error(f"OTLP v1 logs ingestion failed: {str(e)}", exc_info=True)
+        logger.error("OTLP v1 logs ingestion failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to ingest OTLP logs: {str(e)}")
 
 
@@ -770,96 +1106,41 @@ async def ingest_otlp(payload: dict, background_tasks: BackgroundTasks):
                 "stats": parser.stats
             }
         
-        # Get database session
         db = next(get_db())
         repo = IncidentRepository(db)
-        
-        # Process each incident
-        created_incidents = []
-        duplicate_incidents = []
-        failed_incidents = []
-        
-        for incident_data in incidents:
-            try:
-                # Check for duplicates
-                fingerprint = deduplicate_error(
-                    error_title=incident_data.error_title,
-                    stack_trace=incident_data.stack_trace,
-                    app_name=incident_data.app_name
-                )
-                
-                # Check if similar incident exists
-                existing_incident = repo.get_by_fingerprint(fingerprint)
-                if existing_incident:
-                    # Increment occurrence count
-                    existing_incident.occurrence_count += 1
-                    existing_incident.last_occurrence_at = datetime.utcnow()
-                    existing_incident.updated_at = datetime.utcnow()
-                    db.commit()
-                    
-                    duplicate_incidents.append({
-                        "incident_id": existing_incident.incident_id,
-                        "occurrence_count": existing_incident.occurrence_count
-                    })
-                    
-                    logger.info(f"Duplicate OTLP error for incident {existing_incident.incident_id}, occurrence: {existing_incident.occurrence_count}")
-                    continue
-                
-                # Use severity from OTLP parser if provided, otherwise analyze it
-                if incident_data.severity:
-                    from storage.models import Severity
-                    severity_enum = Severity[incident_data.severity]
-                    severity = severity_enum.value  # Convert enum to string for database
-                    logger.info(f"Using severity from OTLP: {severity} (from severityNumber in OTLP payload)")
-                else:
-                    severity = analyze_severity(
-                        error_title=incident_data.error_title,
-                        error_description=incident_data.error_description,
-                        stack_trace=incident_data.stack_trace,
-                        environment=incident_data.environment
-                    )
-                    logger.info(f"Analyzed severity (no OTLP severity provided): {severity}")
-                
-                # Create new incident
-                new_incident = repo.create(
-                    incident=incident_data,
-                    error_fingerprint=fingerprint,
-                    severity=severity
-                )
-                
-                created_incidents.append({
-                    "incident_id": new_incident.incident_id,
-                    "severity": severity,
-                    "app_name": new_incident.app_name,
-                    "error_title": new_incident.error_title[:100]
-                })
 
+        created_incidents, duplicate_incidents, failed_incidents = [], [], []
+
+        for incident_data in incidents:
+            # Legacy endpoint: no grouping/recurring check for backward compat
+            result = _process_single_otlp_incident(
+                incident_data, repo, db, background_tasks,
+                apply_grouping=False, apply_recurring_check=False,
+            )
+            if result["status"] == "duplicate":
+                duplicate_incidents.append({
+                    "incident_id": result["incident_id"],
+                    "occurrence_count": result["occurrence_count"],
+                })
+            elif result["status"] == "created":
                 _link_incident_to_telemetry_log(
                     telemetry_repo=telemetry_repo,
                     telemetry_logs=telemetry_logs,
                     incident_data=incident_data,
-                    incident_id=new_incident.incident_id,
+                    incident_id=result["incident_id"],
                 )
-                
-                # Mark as analyzing immediately so status moves off DETECTED
-                # before the async workflow finishes bootstrapping.
-                if settings.auto_fix_enabled:
-                    repo.update(
-                        new_incident.incident_id,
-                        status=IncidentStatus.ANALYZING.value,
-                        current_workflow_node="assess_severity",
-                    )
-                    logger.info(f"Triggering workflow for OTLP incident {new_incident.incident_id}")
-                    background_tasks.add_task(process_incident_workflow, new_incident.incident_id)
-                
-            except Exception as e:
-                logger.error(f"Failed to process OTLP incident: {str(e)}", exc_info=True)
-                failed_incidents.append({
-                    "error_title": incident_data.error_title[:100],
-                    "error": str(e)
+                created_incidents.append({
+                    "incident_id": result["incident_id"],
+                    "severity": result["severity"],
+                    "app_name": result["app_name"],
+                    "error_title": result["error_title"],
                 })
-        
-        # Build response
+            else:
+                failed_incidents.append({
+                    "error_title": result.get("error_title", ""),
+                    "error": result.get("error", "unknown error"),
+                })
+
         response = {
             "status": "success",
             "message": f"OTLP logs processed: {len(created_incidents)} new incidents, {len(duplicate_incidents)} duplicates",
@@ -868,21 +1149,19 @@ async def ingest_otlp(payload: dict, background_tasks: BackgroundTasks):
                 "incidents_created": len(created_incidents),
                 "duplicates_found": len(duplicate_incidents),
                 "failed": len(failed_incidents),
-                "skipped_low_severity": parser.stats["skipped"]
+                "skipped_low_severity": parser.stats["skipped"],
             },
             "created_incidents": created_incidents,
-            "duplicate_incidents": duplicate_incidents
+            "duplicate_incidents": duplicate_incidents,
         }
-        
         if failed_incidents:
             response["failed_incidents"] = failed_incidents
-        
-        logger.info(f"OTLP ingestion complete: {response['stats']}")
-        
+
+        logger.info("OTLP ingestion complete: %s", response["stats"])
         return response
-        
+
     except Exception as e:
-        logger.error(f"OTLP ingestion failed: {str(e)}", exc_info=True)
+        logger.error("OTLP ingestion failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to ingest OTLP logs: {str(e)}")
 
 

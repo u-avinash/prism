@@ -1,7 +1,24 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """OTLP (OpenTelemetry Protocol) parser for log ingestion."""
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from storage.models import IncidentCreate, TelemetryLogCreate
+from ingestion.tech_detector import detect_technology
 import json
 import logging
 
@@ -248,6 +265,23 @@ class OTLPParser:
             logger.info(f"[OTLP Parser] Incident metadata includes {len(all_attrs)} custom attributes")
             
             # Create incident
+            # Detect source technology from log content
+            tech_profile = detect_technology(
+                stack_trace=stack_trace or self._extract_stack_from_body(telemetry_log.message),
+                error_message=exception_message or "",
+                raw_log=raw_log or "",
+                otlp_attributes=telemetry_log.attributes,
+            )
+            metadata['source_technology'] = tech_profile.technology
+            metadata['detected_framework'] = tech_profile.framework
+            metadata['tech_language'] = tech_profile.language
+            metadata['tech_runtime'] = tech_profile.runtime
+            metadata['tech_confidence'] = tech_profile.confidence
+            logger.info(
+                "[OTLP Parser] Detected technology: %s (framework=%s, confidence=%.2f)",
+                tech_profile.technology, tech_profile.framework, tech_profile.confidence
+            )
+
             incident = IncidentCreate(
                 app_name=telemetry_log.app_name,
                 environment=telemetry_log.environment,
@@ -516,13 +550,40 @@ class OTLPParser:
             return datetime.utcnow()
 
     def _extract_stack_from_body(self, message: str) -> str:
-        """Try to extract stack trace from message body."""
-        # Look for common stack trace patterns
-        if "at " in message and ("java" in message.lower() or "mule" in message.lower()):
-            # Java/MuleSoft stack trace
-            lines = message.split("\n")
-            stack_lines = [line for line in lines if line.strip().startswith("at ")]
-            if stack_lines:
-                return "\n".join(stack_lines[:20])  # First 20 lines
-        
+        """Try to extract stack trace from message body — technology-agnostic."""
+        if not message:
+            return ""
+
+        lines = message.split("\n")
+
+        # Java / MuleSoft: lines starting with "at "
+        stack_lines = [l for l in lines if l.strip().startswith("at ")]
+        if stack_lines:
+            return "\n".join(stack_lines[:20])
+
+        # Python: lines starting with "File " or "  File "
+        py_lines = [l for l in lines if l.strip().startswith("File ")]
+        if py_lines:
+            return "\n".join(py_lines[:20])
+
+        # Go: goroutine blocks
+        if "goroutine" in message.lower() and ".go:" in message:
+            go_lines = [l for l in lines if ".go:" in l or "goroutine" in l.lower()]
+            return "\n".join(go_lines[:20])
+
+        # .NET: lines with "in *.cs:line"
+        cs_lines = [l for l in lines if ".cs:line" in l or "System." in l]
+        if cs_lines:
+            return "\n".join(cs_lines[:20])
+
+        # Ruby: lines with ".rb:" pattern
+        rb_lines = [l for l in lines if ".rb:" in l]
+        if rb_lines:
+            return "\n".join(rb_lines[:20])
+
+        # PHP: lines like "#0 /path/file.php(42)"
+        php_lines = [l for l in lines if l.strip().startswith("#") and ".php(" in l]
+        if php_lines:
+            return "\n".join(php_lines[:20])
+
         return ""

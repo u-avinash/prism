@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Repository pattern for incident CRUD operations."""
 from sqlalchemy.orm import Session
 from sqlalchemy import func, cast, Date
@@ -35,7 +51,15 @@ class IncidentRepository:
         github_file_path = None
         github_line_number = None
         
+        # Technology detection fields (set by OTLP parser before incident creation)
+        source_technology = None
+        detected_framework = None
+
         if incident_metadata and isinstance(incident_metadata, dict):
+            # Extract technology detection results stored by the OTLP parser
+            source_technology = incident_metadata.get('source_technology')
+            detected_framework = incident_metadata.get('detected_framework')
+
             custom_attrs = incident_metadata.get('custom_attributes', {})
             if custom_attrs:
                 # Extract GitHub info from custom attributes
@@ -47,9 +71,12 @@ class IncidentRepository:
                         github_line_number = int(line_number_str)
                     except (ValueError, TypeError):
                         pass
-                
-                logger.info(f"Extracted GitHub metadata - repo: {github_repo}, file: {github_file_path}, line: {github_line_number}")
-        
+
+                logger.info(
+                    "Extracted GitHub metadata - repo: %s, file: %s, line: %s, technology: %s",
+                    github_repo, github_file_path, github_line_number, source_technology
+                )
+
         db_incident = Incident(
             incident_id=incident_id,
             app_name=incident.app_name,
@@ -62,6 +89,8 @@ class IncidentRepository:
             repo_full_name=github_repo,
             error_file_path=github_file_path,
             error_line_number=github_line_number,
+            source_technology=source_technology,
+            detected_framework=detected_framework,
             created_at=incident.timestamp,
             **kwargs
         )

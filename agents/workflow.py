@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """LangGraph workflow orchestration for incident processing."""
 import logging
 import time
@@ -14,7 +30,11 @@ from agents.nodes import (
     generate_patch_file_node,
     reflect_on_fix_node,
     await_approval_node,
-    finalize_node
+    finalize_node,
+    compute_sla_node,
+    check_escalation_node,
+    generate_pir_node,
+    generate_test_suggestion_node,
 )
 from agents.nodes.pdf_report import generate_pdf_report
 from agents.nodes.jira_creator import (
@@ -721,7 +741,13 @@ def run_post_approval_workflow(incident_id: str, project_id: Optional[str] = Non
         "workflow_completed_steps": _workflow_completed_steps,
         "workflow_progress_pct": _workflow_progress_pct,
         "error_message": None,
+        "jira_error": None,
         "messages": [f"▶️ Resuming post-approval workflow for incident {incident_id}"],
+        # SLA & rejection fields (loaded from DB if present)
+        "sla_resolution_due_at": None,
+        "sla_status": None,
+        "rejection_reason_code": None,
+        "fix_attempt_count": 0,
         "created_at": _created_at,
         "updated_at": datetime.utcnow().isoformat(),
         "completed_at": None,
@@ -763,6 +789,9 @@ def run_post_approval_workflow(incident_id: str, project_id: Optional[str] = Non
     logger.info("[Post-Approval] Step 4/4 — Finalize")
     state = finalize_node(state)
 
+    logger.info("[Post-Approval] Step 5/5 — Post-Incident Review")
+    state = generate_pir_node(state)
+
     logger.info("[Post-Approval] Workflow complete for incident %s", incident_id)
     return state
 
@@ -776,16 +805,20 @@ def create_agent_workflow() -> StateGraph:
     Create the LangGraph workflow for incident processing.
 
     Workflow:
-    1. assess_severity     → Determine if auto-fix needed
-    2. generate_rca        → Create Root Cause Analysis      [retryable, stops on failure]
-    3. generate_fix        → Generate code fix               [retryable, stops on failure]
-    4. generate_pdf        → Generate RCA PDF report         [retryable, stops on failure]
-    5. reflect             → Quality assessment              (uses safe defaults on failure)
-    6. generate_patch_file → Generate .patch file            [retryable, stops on failure]
-    7. await_approval      → Human review (workflow pauses here; patch already available)
-    8. send_notifications  → Slack/Teams alerts
-    9. create_jira_pr      → Create Jira ticket and GitHub PR
-    10. finalize           → Update database and complete
+    1. assess_severity     → Determine severity (LLM-first + heuristic fallback)
+    2. compute_sla         → Set SLA due timestamp for the incident
+    3. generate_rca        → Create Root Cause Analysis + historical context [retryable]
+    4. generate_fix        → Generate code fix (technology-aware)            [retryable]
+    5. suggest_test        → Generate unit test suggestion (best-effort, non-blocking)
+    6. generate_pdf        → Generate RCA PDF report                         [retryable]
+    7. reflect             → Quality assessment (uses safe defaults on failure)
+    8. generate_patch_file → Generate .patch file                            [retryable]
+    9. await_approval      → Human review (workflow pauses; patch available for download)
+   10. check_escalation    → SLA check + repeat-rejection escalation
+   11. send_notifications  → Slack/Teams alerts (with diff + deep-links)
+   12. create_jira_pr      → Create Jira ticket and GitHub PR
+   13. finalize            → Persist final state, source_technology, SLA, rejection data
+   (post-approval) generate_pir → Post-Incident Review generated as a comment
 
     After human approval, run_post_approval_workflow() continues from step 8.
     Patch generation is skipped in run_post_approval_workflow() when the patch
@@ -806,6 +839,7 @@ def create_agent_workflow() -> StateGraph:
 
     # Register nodes — LLM-calling nodes are wrapped with retry-on-error logic.
     workflow.add_node("assess_severity", assess_severity_node)
+    workflow.add_node("compute_sla", compute_sla_node)          # SLA timer set after severity
     workflow.add_node(
         "generate_rca",
         _make_retryable_node(generate_rca_node, "generate_rca", max_retries=2, retry_delay_seconds=5.0),
@@ -818,19 +852,24 @@ def create_agent_workflow() -> StateGraph:
         "generate_pdf",
         _make_retryable_node(generate_pdf_report, "generate_pdf", max_retries=1, retry_delay_seconds=5.0),
     )
+    workflow.add_node("suggest_test", generate_test_suggestion_node)   # best-effort, never blocks
     workflow.add_node("reflect", reflect_on_fix_node)  # uses safe defaults on failure — no retry needed
     workflow.add_node(
         "generate_patch_file",
         _make_retryable_node(generate_patch_file_node, "generate_patch_file", max_retries=1, retry_delay_seconds=3.0),
     )
     workflow.add_node("await_approval", await_approval_node)
+    workflow.add_node("check_escalation", check_escalation_node)  # SLA/repeat-rejection check
     workflow.add_node("send_notifications", send_notifications_node)
     workflow.add_node("create_jira_pr", create_jira_and_pr_node)
     workflow.add_node("finalize", finalize_node)
 
     workflow.set_entry_point("assess_severity")
 
-    # --- assess_severity → generate_rca / finalize ---
+    # --- assess_severity → compute_sla (always) ---
+    workflow.add_edge("assess_severity", "compute_sla")
+
+    # --- compute_sla → generate_rca / finalize ---
     def should_generate_rca(state: AgentState) -> Literal["generate_rca", "finalize"]:
         severity = state.get("severity", "LOW")
         is_duplicate = state.get("is_duplicate", False)
@@ -844,7 +883,7 @@ def create_agent_workflow() -> StateGraph:
         return "finalize"
 
     workflow.add_conditional_edges(
-        "assess_severity",
+        "compute_sla",
         should_generate_rca,
         {"generate_rca": "generate_rca", "finalize": "finalize"},
     )
@@ -865,21 +904,24 @@ def create_agent_workflow() -> StateGraph:
         {"generate_fix": "generate_fix", "finalize": "finalize"},
     )
 
-    # --- generate_fix → generate_pdf  (stop on failure) ---
-    def route_after_fix(state: AgentState) -> Literal["generate_pdf", "finalize"]:
+    # --- generate_fix → suggest_test (always, non-blocking) ---
+    def route_after_fix(state: AgentState) -> Literal["suggest_test", "finalize"]:
         if state.get("error_message"):
             logger.error(
                 "[Workflow] Fix generation failed after retries for incident %s — stopping workflow: %s",
                 state.get("incident_id"), state.get("error_message"),
             )
             return "finalize"
-        return "generate_pdf"
+        return "suggest_test"
 
     workflow.add_conditional_edges(
         "generate_fix",
         route_after_fix,
-        {"generate_pdf": "generate_pdf", "finalize": "finalize"},
+        {"suggest_test": "suggest_test", "finalize": "finalize"},
     )
+
+    # --- suggest_test → generate_pdf (always — test suggester never fails workflow) ---
+    workflow.add_edge("suggest_test", "generate_pdf")
 
     # --- generate_pdf → reflect  (stop on failure) ---
     def route_after_pdf(state: AgentState) -> Literal["reflect", "finalize"]:
@@ -916,7 +958,10 @@ def create_agent_workflow() -> StateGraph:
         {"await_approval": "await_approval", "finalize": "finalize"},
     )
 
-    # --- await_approval → send_notifications / finalize ---
+    # --- await_approval → check_escalation (always, before routing on approval status) ---
+    workflow.add_edge("await_approval", "check_escalation")
+
+    # --- check_escalation → send_notifications / finalize ---
     def should_continue_after_approval(
         state: AgentState,
     ) -> Literal["send_notifications", "finalize"]:
@@ -932,7 +977,7 @@ def create_agent_workflow() -> StateGraph:
         return "send_notifications"
 
     workflow.add_conditional_edges(
-        "await_approval",
+        "check_escalation",
         should_continue_after_approval,
         {"send_notifications": "send_notifications", "finalize": "finalize"},
     )

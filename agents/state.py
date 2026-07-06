@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Agent state definition for LangGraph workflow."""
 from typing import TypedDict, Annotated, Optional, List
 import operator
@@ -126,6 +142,14 @@ class AgentState(TypedDict):
     jira_error: Optional[str]     # Jira API error message (persisted to DB for UI display)
     messages: Annotated[List[str], operator.add]  # Audit trail
     
+    # SLA tracking
+    sla_resolution_due_at: Optional[str]   # ISO timestamp
+    sla_status: Optional[str]              # ON_TRACK | AT_RISK | BREACHED
+
+    # Structured rejection feedback
+    rejection_reason_code: Optional[str]   # one of REJECTION_REASON_CODES
+    fix_attempt_count: Optional[int]       # number of fix regeneration attempts
+
     # Timestamps (ISO format strings)
     created_at: str
     updated_at: str
@@ -252,6 +276,14 @@ def create_initial_state(
         jira_error=None,
         messages=[],
         
+        # SLA tracking
+        sla_resolution_due_at=None,
+        sla_status=None,
+
+        # Structured rejection feedback
+        rejection_reason_code=None,
+        fix_attempt_count=0,
+
         # Timestamps
         created_at=created_at,
         updated_at=created_at,

@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Fix quality reflection node using LLM self-critique."""
 import logging
 from datetime import datetime
@@ -6,6 +22,7 @@ import yaml
 import json
 import re
 from agents.state import AgentState, WORKFLOW_TOTAL_STEPS
+from agents.nodes.node_utils import mark_step_complete, update_incident_db
 from integrations.llm_provider import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -205,22 +222,8 @@ Output ONLY the JSON object. Start with { and end with }."""
             state['workflow_completed_steps'] = completed_steps
             state['workflow_progress_pct'] = len(completed_steps) / WORKFLOW_TOTAL_STEPS
 
-            # Update database
-            try:
-                from storage.database import get_session
-                from storage.incident_repository import IncidentRepository
-
-                with get_session() as session:
-                    repo = IncidentRepository(session)
-                    repo.update(
-                        incident_id=state['incident_id'],
-                        current_workflow_node='reflect',
-                        workflow_completed_steps=state['workflow_completed_steps'],
-                        workflow_progress_pct=state['workflow_progress_pct']
-                    )
-            except Exception as db_error:
-                logger.warning(f"Failed to update workflow progress in DB: {db_error}")
-
+            # Persist safe defaults to DB and return
+            mark_step_complete(state, 'reflect')
             return state
         
         # Parse JSON response with full response logging for debugging
@@ -241,34 +244,24 @@ Output ONLY the JSON object. Start with { and end with }."""
         state['overall_quality_score'] = quality_scores.get('overall_score', 0.5)
         state['quality_concerns'] = quality_scores.get('concerns', [])
         state['quality_recommendation'] = quality_scores.get('recommendation', 'REJECT')
-        
+
         state['current_node'] = 'reflect'
         state['updated_at'] = datetime.utcnow().isoformat()
-        
+
         completed_steps = list(state.get('workflow_completed_steps') or [])
-        
+
         # Add step only if not already completed (prevent duplicates)
         if 'reflect' not in completed_steps:
             completed_steps.append('reflect')
         state['workflow_completed_steps'] = completed_steps
-        
+
         state['workflow_progress_pct'] = len(completed_steps) / WORKFLOW_TOTAL_STEPS
 
-        # Update database with workflow progress
-        try:
-            from storage.database import get_session
-            from storage.incident_repository import IncidentRepository
-
-            with get_session() as session:
-                repo = IncidentRepository(session)
-                repo.update(
-                    incident_id=state['incident_id'],
-                    current_workflow_node='reflect',
-                    workflow_completed_steps=state['workflow_completed_steps'],
-                    workflow_progress_pct=state['workflow_progress_pct']
-                )
-        except Exception as db_error:
-            logger.warning(f"Failed to update workflow progress in DB: {db_error}")
+        # Persist quality scores + workflow progress to DB
+        # fix_quality_score is read by the UI approval gate to show the confidence card
+        mark_step_complete(state, 'reflect', extra_db_updates={
+            'fix_quality_score': state['overall_quality_score'],
+        })
 
         # Determine approval path
         overall_score = state['overall_quality_score']
@@ -306,27 +299,7 @@ Output ONLY the JSON object. Start with { and end with }."""
         ]
     
     # ALWAYS update workflow tracking, even on error
-    completed_steps = list(state.get('workflow_completed_steps') or [])
-    if 'reflect' not in completed_steps:
-        completed_steps.append('reflect')
-    state['workflow_completed_steps'] = completed_steps
-    state['workflow_progress_pct'] = len(completed_steps) / WORKFLOW_TOTAL_STEPS
-
-    # Update database with workflow progress
-    try:
-        from storage.database import get_session
-        from storage.incident_repository import IncidentRepository
-        
-        with get_session() as session:
-            repo = IncidentRepository(session)
-            repo.update(
-                incident_id=state['incident_id'],
-                current_workflow_node='reflect',
-                workflow_completed_steps=state['workflow_completed_steps'],
-                workflow_progress_pct=state['workflow_progress_pct']
-            )
-    except Exception as db_error:
-        logger.warning(f"Failed to update workflow progress in DB: {db_error}")
+    mark_step_complete(state, 'reflect')
     
     return state
 

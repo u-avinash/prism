@@ -1,7 +1,23 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Severity assessment node - determines if auto-fix should be triggered."""
 import logging
-from datetime import datetime
 from agents.state import AgentState
+from agents.nodes.node_utils import mark_step_complete
 from utils.severity_analyzer import SeverityAnalyzer
 from storage.models import Severity
 
@@ -25,34 +41,42 @@ def assess_severity_node(state: AgentState) -> AgentState:
     """
     logger.info(f"[Severity Assessment] Processing incident {state['incident_id']}")
     
-    analyzer = SeverityAnalyzer()
-    
+    # Extract technology from metadata (set by OTLP parser)
+    metadata = state.get('metadata') or {}
+    source_technology = metadata.get('source_technology')
+
+    # Pass project_id so the analyzer can use LLM classification
+    analyzer = SeverityAnalyzer(project_id=state.get('project_id'))
+
     # Check if severity was already provided from OTLP
     existing_severity = state.get('severity')
-    
+
     if existing_severity and existing_severity in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']:
-        # Use OTLP severity - DO NOT override
+        # Use OTLP severity - DO NOT override with LLM (OTLP signal is ground truth)
         try:
             severity = Severity[existing_severity]
-            confidence = 1.0  # OTLP severity has 100% confidence
+            confidence = 1.0
             logger.info(f"[Severity Assessment] Using OTLP severity: {severity.value}")
         except (KeyError, ValueError):
-            # Fallback to analyzer if invalid severity
             logger.warning(f"[Severity Assessment] Invalid OTLP severity '{existing_severity}', re-analyzing")
             severity, confidence = analyzer.analyze_severity(
                 error_title=state['error_title'],
                 error_description=state['error_description'],
                 stack_trace=state['stack_trace'],
-                app_name=state['app_name']
+                app_name=state.get('app_name'),
+                environment=state.get('environment'),
+                source_technology=source_technology,
             )
     else:
-        # No OTLP severity - use keyword-based analyzer
-        logger.info(f"[Severity Assessment] No OTLP severity found, analyzing...")
+        # No OTLP severity — use LLM-first analyzer
+        logger.info("[Severity Assessment] No OTLP severity found, running LLM+heuristic analysis...")
         severity, confidence = analyzer.analyze_severity(
             error_title=state['error_title'],
             error_description=state['error_description'],
             stack_trace=state['stack_trace'],
-            app_name=state['app_name']
+            app_name=state.get('app_name'),
+            environment=state.get('environment'),
+            source_technology=source_technology,
         )
     
     # Check if auto-fix should be triggered
@@ -64,40 +88,10 @@ def assess_severity_node(state: AgentState) -> AgentState:
     
     # Update state
     state['severity'] = severity.value
-    state['current_node'] = 'assess_severity'
-    state['updated_at'] = datetime.utcnow().isoformat()
-    
-    # Update workflow tracking
-    if 'workflow_completed_steps' not in state:
-        state['workflow_completed_steps'] = []
-    
-    # Add step only if not already completed (prevent duplicates)
-    if 'assess_severity' not in state['workflow_completed_steps']:
-        state['workflow_completed_steps'].append('assess_severity')
-    
-    # Calculate progress based on 11 total workflow steps
-    state['workflow_progress_pct'] = len(state['workflow_completed_steps']) / 11.0
-    
-    # Determine if human approval is required
-    # HIGH and CRITICAL always require approval
     state['requires_approval'] = severity in [Severity.HIGH, Severity.CRITICAL]
-    
-    # Update database with workflow progress
-    try:
-        from storage.database import get_session
-        from storage.incident_repository import IncidentRepository
-        
-        with get_session() as session:
-            repo = IncidentRepository(session)
-            repo.update(
-                incident_id=state['incident_id'],
-                current_workflow_node='assess_severity',
-                workflow_completed_steps=state['workflow_completed_steps'],
-                workflow_progress_pct=state['workflow_progress_pct'],
-                severity=severity.value
-            )
-    except Exception as e:
-        logger.warning(f"Failed to update workflow progress in DB: {e}")
+
+    # Update workflow tracking + persist to DB in a single call
+    mark_step_complete(state, 'assess_severity', extra_db_updates={'severity': severity.value})
     
     if should_fix:
         state['messages'] = [

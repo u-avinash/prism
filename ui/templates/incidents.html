@@ -1,3 +1,19 @@
+<!--
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+-->
 {% extends "base.html" %}
 {% block title %}Incidents — Prism{% endblock %}
 {% block topbar_title %}Incidents{% endblock %}
@@ -123,6 +139,18 @@
               {% set has_primary_status = normalized_status not in ['', 'UNKNOWN'] %}
               {% set show_secondary_approval = normalized_approval in ['pending', 'approved', 'rejected'] and normalized_status not in ['PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'COMPLETED', 'PR_CREATED'] %}
               <span class="badge {{ inc.status | status_badge }} incident-status-badge">{{ (inc.status or 'UNKNOWN').replace('_', ' ') }}</span>
+              {% if inc.sla_status and inc.sla_resolution_due_at %}
+              {% set _terminal = inc.status in ('COMPLETED', 'PR_CREATED', 'REJECTED', 'FAILED', 'JIRA_CREATED') %}
+              {% if _terminal %}
+                {% if inc.sla_status == 'MET' %}
+                <span class="badge badge-success" title="SLA met — resolved within the deadline">✓ SLA MET</span>
+                {% elif inc.sla_status == 'BREACHED' %}
+                <span class="badge badge-error" title="SLA breached — deadline missed">✕ SLA BREACHED</span>
+                {% endif %}
+              {% else %}
+              <span class="badge {% if inc.sla_status == 'BREACHED' %}badge-error{% elif inc.sla_status == 'AT_RISK' %}badge-warning{% else %}badge-success{% endif %}" title="SLA: {{ inc.sla_status }}">⏱ {{ inc.sla_status.replace('_', ' ') }}</span>
+              {% endif %}
+              {% endif %}
               {% if show_secondary_approval %}
                 {% if normalized_approval == 'pending' %}<span class="badge badge-warning">Needs Review</span>{% endif %}
                 {% if normalized_approval == 'approved' %}<span class="badge badge-success">Approved</span>{% endif %}
@@ -402,6 +430,82 @@ async function bulkAction(action) {
   0% { transform: scale(.95); box-shadow: 0 0 0 0 rgba(37,99,235,.35); }
   70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(37,99,235,0); }
   100% { transform: scale(.95); box-shadow: 0 0 0 0 rgba(37,99,235,0); }
+}
+
+/* ── Mobile-responsive incident cards ──────────────────────────────────── */
+@media (max-width: 640px) {
+  /* Stack the toolbar vertically on small screens */
+  #filterForm {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  #filterForm input[type="text"],
+  #filterForm select {
+    width: 100%;
+    max-width: 100% !important;
+  }
+
+  /* Full-width project switcher */
+  #projectSwitcher {
+    max-width: 100% !important;
+  }
+
+  /* Incident card: stack content vertically */
+  [data-incident-id] {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 10px !important;
+    padding: 14px !important;
+  }
+
+  /* Status badges section: wrap and left-align */
+  [data-incident-id] > div:last-child {
+    min-width: 0 !important;
+    align-items: flex-start !important;
+    justify-content: flex-start !important;
+    flex-wrap: wrap;
+  }
+
+  /* Severity + title row: allow title to wrap */
+  [data-incident-id] > div:first-child > div:first-child {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  /* Hide checkbox column on tiny screens */
+  .incident-cb {
+    display: none;
+  }
+
+  /* Bulk action bar: stack */
+  #bulkActionBar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  #bulkNotesInput {
+    max-width: 100% !important;
+  }
+
+  /* Integration pills: smaller font */
+  .integration-pill {
+    font-size: .68rem !important;
+    padding: 3px 7px !important;
+  }
+
+  /* Stats counters: smaller */
+  .stat-counter {
+    min-width: 60px !important;
+    padding: 8px 10px !important;
+  }
+}
+
+@media (max-width: 480px) {
+  /* Ultra-small: hide environment pill to save space */
+  .incident-env-pill { display: none; }
+
+  /* Compact header */
+  h1, .topbar-title { font-size: 1rem !important; }
 }
 </style>
 {% endblock %}

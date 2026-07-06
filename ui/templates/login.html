@@ -1,3 +1,19 @@
+<!--
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -103,42 +119,54 @@
       margin-bottom: 28px;
     }
 
-    /* Role selector tabs */
-    .role-tabs {
-      display: flex;
-      gap: 6px;
-      margin-bottom: 24px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(99,102,241,0.15);
-      border-radius: 12px;
-      padding: 5px;
+    /* Role dropdown */
+    .role-dropdown-wrapper {
+      position: relative;
     }
-    .role-tab {
-      flex: 1;
-      padding: 8px 6px;
-      border: none;
-      border-radius: 8px;
-      background: transparent;
-      color: #64748b;
+    .role-dropdown-wrapper .input-icon {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: #475569;
+      font-size: 16px;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .role-dropdown-wrapper .dropdown-arrow {
+      position: absolute;
+      right: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: #475569;
       font-size: 12px;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .role-select {
+      width: 100%;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(99,102,241,0.2);
+      border-radius: 10px;
+      color: #e2e8f0;
+      font-size: 14px;
       font-weight: 500;
+      padding: 12px 42px 12px 42px;
+      transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+      outline: none;
+      appearance: none;
+      -webkit-appearance: none;
       cursor: pointer;
-      transition: all 0.2s;
-      text-align: center;
-      letter-spacing: 0.2px;
     }
-    .role-tab:hover { color: #94a3b8; background: rgba(255,255,255,0.05); }
-    .role-tab.active {
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
-      color: #fff;
-      font-weight: 600;
-      box-shadow: 0 2px 8px rgba(99,102,241,0.35);
+    .role-select:focus {
+      border-color: rgba(99,102,241,0.6);
+      background: rgba(99,102,241,0.07);
+      box-shadow: 0 0 0 3px rgba(99,102,241,0.12);
     }
-    .role-tab.active.tab-team-admin {
-      background: linear-gradient(135deg, #0ea5e9, #6366f1);
-    }
-    .role-tab.active.tab-user {
-      background: linear-gradient(135deg, #10b981, #0ea5e9);
+    .role-select option {
+      background: #0f1428;
+      color: #e2e8f0;
+      padding: 10px;
     }
 
     .form-group { margin-bottom: 18px; }
@@ -202,7 +230,7 @@
       font-size: 15px;
       font-weight: 600;
       cursor: pointer;
-      transition: all 0.2s;
+      transition: all 0.2s, background 0.25s;
       box-shadow: 0 4px 16px rgba(99,102,241,0.35);
       margin-top: 8px;
       letter-spacing: 0.3px;
@@ -212,6 +240,11 @@
       box-shadow: 0 6px 24px rgba(99,102,241,0.5);
     }
     .btn-login:active { transform: translateY(0); }
+
+    /* Role-specific button accent colours */
+    .btn-login.role-admin       { background: linear-gradient(135deg, #6366f1, #8b5cf6); box-shadow: 0 4px 16px rgba(99,102,241,0.35); }
+    .btn-login.role-team-admin  { background: linear-gradient(135deg, #0ea5e9, #6366f1); box-shadow: 0 4px 16px rgba(14,165,233,0.35); }
+    .btn-login.role-user        { background: linear-gradient(135deg, #10b981, #0ea5e9); box-shadow: 0 4px 16px rgba(16,185,129,0.35); }
 
     .credentials-section {
       margin-top: 20px;
@@ -240,13 +273,6 @@
       <h1 class="card-title">Welcome back</h1>
       <p class="card-subtitle">Select your role and sign in to continue</p>
 
-      <!-- Role Tabs -->
-      <div class="role-tabs" id="roleTabs">
-        <button type="button" class="role-tab tab-admin" data-role="admin" onclick="selectRole('admin')">🛡 Admin</button>
-        <button type="button" class="role-tab tab-team-admin" data-role="team_admin" onclick="selectRole('team_admin')">👥 Team Admin</button>
-        <button type="button" class="role-tab tab-user active" data-role="user" onclick="selectRole('user')">👤 User</button>
-      </div>
-
       {% if error %}
       <div class="alert-error">
         <span>⚠</span>
@@ -255,7 +281,21 @@
       {% endif %}
 
       <form method="POST" action="/login" id="loginForm">
-        <input type="hidden" name="role_hint" id="roleHintInput" value="user" />
+        <input type="hidden" name="role_hint" id="roleHintInput" value="admin" />
+
+        <!-- Role Dropdown -->
+        <div class="form-group">
+          <label class="form-label" for="roleSelect">Sign in as</label>
+          <div class="role-dropdown-wrapper">
+            <span class="input-icon" id="roleIcon">🛡</span>
+            <select id="roleSelect" class="role-select" onchange="selectRole(this.value)">
+              <option value="admin">Admin</option>
+              <option value="team_admin">Team Admin</option>
+              <option value="user">User</option>
+            </select>
+            <span class="dropdown-arrow">▾</span>
+          </div>
+        </div>
 
         <div class="form-group">
           <label class="form-label" for="username">Username</label>
@@ -290,7 +330,7 @@
           </div>
         </div>
 
-        <button type="submit" class="btn-login" id="signInBtn">Sign In →</button>
+        <button type="submit" class="btn-login role-admin" id="signInBtn">Sign In →</button>
       </form>
 
       <!-- Sign-in note -->
@@ -305,17 +345,28 @@
   </div>
 
   <script>
-    function selectRole(role) {
-      // Update tab states
-      document.querySelectorAll('.role-tab').forEach(t => t.classList.remove('active'));
-      var activeTab = document.querySelector('[data-role="' + role + '"]');
-      if (activeTab) activeTab.classList.add('active');
+    var roleConfig = {
+      admin:      { icon: '🛡', btnClass: 'role-admin',      label: 'Sign In as Admin →' },
+      team_admin: { icon: '👥', btnClass: 'role-team-admin', label: 'Sign In as Team Admin →' },
+      user:       { icon: '👤', btnClass: 'role-user',       label: 'Sign In →' }
+    };
 
-      // Update hidden input
+    function selectRole(role) {
+      var cfg = roleConfig[role] || roleConfig['user'];
+
+      // Update hidden input for backend
       document.getElementById('roleHintInput').value = role;
+
+      // Update the icon inside the dropdown wrapper
+      document.getElementById('roleIcon').textContent = cfg.icon;
+
+      // Update button accent colour and label
+      var btn = document.getElementById('signInBtn');
+      btn.className = 'btn-login ' + cfg.btnClass;
+      btn.textContent = cfg.label;
     }
 
-    // Init: select Admin tab by default but leave username/password blank
+    // Init with admin selected
     selectRole('admin');
   </script>
 </body>

@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Pydantic models for data validation and serialization."""
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
@@ -156,11 +172,28 @@ class IncidentResponse(BaseModel):
     commit_sha: Optional[str] = None
     commit_url: Optional[str] = None
     
+    # Incident grouping + recurring pattern
+    incident_group_id: Optional[str] = None
+    is_primary_incident: Optional[bool] = None
+    incident_metadata: Optional[dict] = None
+
+    # Technology detection
+    source_technology: Optional[str] = None
+    detected_framework: Optional[str] = None
+
+    # SLA tracking
+    sla_resolution_due_at: Optional[datetime] = None
+    sla_status: Optional[str] = None
+
+    # Structured rejection feedback
+    rejection_reason_code: Optional[str] = None
+    fix_attempt_count: Optional[int] = None
+
     # Metadata
     created_at: datetime
     updated_at: datetime
     processing_errors: List[str] = Field(default_factory=list)
-    
+
     class Config:
         from_attributes = True
 

@@ -1,0 +1,44 @@
+🚨 What if your production incidents fixed themselves?
+
+I built Prism — an autonomous AI incident management platform that takes a production error all the way to a reviewed, approved GitHub Pull Request. No 3am pages. No manual Jira tickets. No branch creation by hand.
+
+Here's what the pipeline looks like:
+
+1️⃣ Your app emits an OTLP error log
+2️⃣ Prism deduplicates it (SimHash fingerprinting — no duplicate tickets)
+3️⃣ Classifies severity: LOW / MEDIUM / HIGH / CRITICAL
+4️⃣ For HIGH/CRITICAL: fetches the actual source file from GitHub
+5️⃣ Runs an 11-step LangGraph agentic workflow:
+   → AI Root Cause Analysis (with live code context)
+   → Code fix (language & framework aware)
+   → Quality scoring (correctness / safety / code quality / completeness)
+   → PDF report + downloadable patch file
+6️⃣ ⏸️ PAUSES — and waits for a human to approve
+7️⃣ One click later: Slack alert, Jira ticket, GitHub branch, PR — all done
+
+One decision. That's the only manual step.
+
+
+A few design principles I'm proud of:
+
+🔒 Human-in-the-loop is non-negotiable
+The AI generates; the engineer decides. No code lands in your repo without human sign-off. Reviewers get the full RCA, a fix diff, quality scores, and a downloadable patch to test locally. If the fix is wrong, they reject with feedback — the system regenerates with that feedback injected into the prompt.
+
+🧠 Pluggable LLM — your choice
+OpenAI, Anthropic, Azure OpenAI, Gemini, Groq, or local Ollama. Swap providers in one settings field. No code changes.
+
+🔁 Resilient by design
+Every LLM node retries on failure with automatic fallback to a clean FAILED state. The workflow always terminates. No hanging pipelines, ever.
+
+🏢 Multi-tenant, encrypted at rest
+Each team's credentials (Jira, GitHub, LLM keys, Slack webhooks) are AES-encrypted and fully isolated. Platform admins can't see other teams' secrets.
+
+
+The goal was never to replace engineers. It was to compress the 45-minute research-and-draft phase into a 90-second approval decision.
+
+Full source code — open source, Python 3.11+, zero-config quick start:
+👉 https://github.com/u-avinash/prism
+
+What does your current incident response workflow look like? Would love to hear how others are thinking about AI in this space.
+
+#AI #DevOps #SRE #LangGraph #OpenTelemetry #AIOps

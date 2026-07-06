@@ -1,9 +1,26 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Severity analysis and auto-fix decision logic."""
 import re
-from typing import Tuple
+import json
+import logging
+from typing import Tuple, Optional
 from storage.models import Severity
 from config.settings import get_settings
-import logging
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -12,76 +29,191 @@ settings = get_settings()
 class SeverityAnalyzer:
     """
     Analyze error severity and determine if auto-fix should be triggered.
+
+    Uses an LLM-first approach (when a project_id is supplied) with a fast
+    heuristic fallback so the pipeline never blocks on an LLM call.
     """
-    
-    # Keyword patterns for severity classification
+
+    # Fast-path critical heuristics — never blocked by LLM
     CRITICAL_KEYWORDS = [
-        r'outofmemory', r'fatal', r'critical', r'security', r'authentication',
+        r'outofmemory', r'fatal', r'critical', r'security breach',
         r'database.*down', r'connection.*refused', r'unable to connect',
-        r'service.*unavailable', r'deadlock', r'corruption'
+        r'service.*unavailable', r'deadlock', r'data corruption',
+        r'disk full', r'out of disk', r'kernel panic',
     ]
-    
+
     HIGH_KEYWORDS = [
-        r'exception', r'error', r'failed', r'timeout', 
+        r'exception', r'error', r'failed', r'timeout',
         r'null.*(pointer|object|reference)', r'cannot access property',
         r'undefined.*object', r'nullpointerexception',
         r'resource.*exhausted', r'permission.*denied', r'access.*denied',
-        r'invalid.*credentials', r'quota.*exceeded', r'cannot.*null'
+        r'invalid.*credentials', r'quota.*exceeded', r'cannot.*null',
     ]
-    
+
     MEDIUM_KEYWORDS = [
         r'warning', r'deprecated', r'retry', r'slow', r'performance',
-        r'rate.*limit', r'validation.*failed', r'bad.*request'
+        r'rate.*limit', r'validation.*failed', r'bad.*request',
     ]
-    
-    def __init__(self):
+
+    def __init__(self, project_id: Optional[str] = None):
         """Initialize severity analyzer."""
         self.auto_fix_enabled = settings.auto_fix_enabled
         self.severity_threshold = Severity[settings.auto_fix_severity_threshold]
         self.burst_window = settings.error_burst_window_minutes
         self.burst_threshold = settings.error_burst_threshold
-    
+        self.project_id = project_id
+
     def analyze_severity(
         self,
         error_title: str,
         error_description: str,
         stack_trace: str,
-        app_name: str = None
+        app_name: Optional[str] = None,
+        environment: Optional[str] = None,
+        source_technology: Optional[str] = None,
     ) -> Tuple[Severity, float]:
         """
-        Analyze error severity based on keywords and patterns.
-        
+        Analyze error severity.
+
+        Strategy:
+          1. Fast heuristic pre-check — if CLEARLY critical/high, skip LLM.
+          2. LLM classification (if project_id available) — structured output.
+          3. Fallback to heuristic keyword scoring if LLM fails or unavailable.
+
         Args:
-            error_title: Error title/message
-            error_description: Error description
-            stack_trace: Stack trace
-            app_name: Application name (optional)
-            
+            error_title:        Error title/message
+            error_description:  Error description
+            stack_trace:        Stack trace
+            app_name:           Application name (optional)
+            environment:        Deployment environment (optional, e.g. production)
+            source_technology:  Detected technology (optional, e.g. java, python)
+
         Returns:
             Tuple of (Severity, confidence_score)
         """
         combined_text = f"{error_title} {error_description} {stack_trace}".lower()
-        
-        # Check for CRITICAL severity
+
+        # --- Fast-path for obvious CRITICAL signals ---
+        critical_score = self._calculate_keyword_score(combined_text, self.CRITICAL_KEYWORDS)
+        if critical_score >= 0.5:
+            logger.info("Fast-path CRITICAL (score: %.2f)", critical_score)
+            return Severity.CRITICAL, min(critical_score, 1.0)
+
+        # --- LLM classification (best-effort) ---
+        if self.project_id:
+            llm_result = self._llm_classify(
+                error_title=error_title,
+                error_description=error_description,
+                stack_trace=stack_trace,
+                environment=environment or "unknown",
+                source_technology=source_technology or "unknown",
+            )
+            if llm_result:
+                severity, confidence = llm_result
+                logger.info("[LLM Severity] %s (confidence: %.2f)", severity.value, confidence)
+                return severity, confidence
+
+        # --- Heuristic fallback ---
+        return self._heuristic_classify(combined_text)
+
+    def _llm_classify(
+        self,
+        error_title: str,
+        error_description: str,
+        stack_trace: str,
+        environment: str,
+        source_technology: str,
+    ) -> Optional[Tuple[Severity, float]]:
+        """
+        Call LLM for structured severity classification.
+
+        Returns (Severity, confidence) on success, None on failure.
+        """
+        try:
+            from integrations.llm_provider import LLMProvider
+
+            llm = LLMProvider(project_id=self.project_id)
+
+            prompt = f"""You are a software reliability engineer classifying the severity of a production error.
+
+ERROR TITLE: {error_title}
+TECHNOLOGY: {source_technology}
+ENVIRONMENT: {environment}
+DESCRIPTION: {error_description[:500]}
+STACK TRACE (first 800 chars): {stack_trace[:800]}
+
+Classify the severity. Rules:
+- CRITICAL: system crash, data loss, security breach, total service outage, OOM kill
+- HIGH:     unhandled exception that breaks a user flow, repeated failures, data integrity risk
+- MEDIUM:   degraded functionality, non-critical failure, warning-level issue caught in catch block
+- LOW:      informational, deprecation notice, single transient error that auto-recovered
+
+Also set is_transient=true if the error looks like a momentary blip (e.g., one-time timeout that likely resolved).
+
+Respond ONLY with valid JSON (no markdown):
+{{"severity": "HIGH", "confidence": 0.85, "reasoning": "one sentence", "is_transient": false, "affected_component": "OrderService"}}"""
+
+            response = llm.invoke(
+                prompt=prompt,
+                system_message="You are a reliability engineer. Respond ONLY with the JSON object.",
+                temperature=0.1,
+                json_mode=True,
+            )
+
+            # Strip markdown fences if present
+            response = response.strip()
+            response = re.sub(r'```json\s*', '', response)
+            response = re.sub(r'```\s*$', '', response)
+
+            match = re.search(r'\{.*\}', response, re.DOTALL)
+            if not match:
+                raise ValueError("No JSON found in LLM severity response")
+
+            data = json.loads(match.group(0))
+            severity_str = str(data.get('severity', 'HIGH')).upper()
+            confidence = float(data.get('confidence', 0.75))
+            reasoning = data.get('reasoning', '')
+            is_transient = bool(data.get('is_transient', False))
+
+            # Downgrade transient errors by one level
+            if is_transient and severity_str in ('HIGH', 'CRITICAL'):
+                severity_str = 'MEDIUM' if severity_str == 'HIGH' else 'HIGH'
+                confidence = max(confidence - 0.1, 0.5)
+                logger.info("[LLM Severity] Transient flag — downgraded to %s", severity_str)
+
+            severity_map = {
+                'CRITICAL': Severity.CRITICAL,
+                'HIGH': Severity.HIGH,
+                'MEDIUM': Severity.MEDIUM,
+                'LOW': Severity.LOW,
+            }
+            severity = severity_map.get(severity_str, Severity.HIGH)
+
+            logger.info(
+                "[LLM Severity] %s | confidence=%.2f | transient=%s | %s",
+                severity.value, confidence, is_transient, reasoning
+            )
+            return severity, round(confidence, 3)
+
+        except Exception as exc:
+            logger.warning("[LLM Severity] Classification failed (%s), falling back to heuristic", exc)
+            return None
+
+    def _heuristic_classify(self, combined_text: str) -> Tuple[Severity, float]:
+        """Keyword-based fallback severity classification."""
         critical_score = self._calculate_keyword_score(combined_text, self.CRITICAL_KEYWORDS)
         if critical_score > 0:
-            logger.info(f"Classified as CRITICAL (score: {critical_score:.2f})")
             return Severity.CRITICAL, min(critical_score, 1.0)
-        
-        # Check for HIGH severity
+
         high_score = self._calculate_keyword_score(combined_text, self.HIGH_KEYWORDS)
         if high_score > 0.5:
-            logger.info(f"Classified as HIGH (score: {high_score:.2f})")
             return Severity.HIGH, min(high_score, 1.0)
-        
-        # Check for MEDIUM severity
+
         medium_score = self._calculate_keyword_score(combined_text, self.MEDIUM_KEYWORDS)
         if medium_score > 0.3:
-            logger.info(f"Classified as MEDIUM (score: {medium_score:.2f})")
             return Severity.MEDIUM, min(medium_score, 1.0)
-        
-        # Default to LOW
-        logger.info("Classified as LOW (no strong indicators)")
+
+        logger.info("Heuristic: classified as LOW")
         return Severity.LOW, 0.5
     
     def _calculate_keyword_score(self, text: str, keywords: list) -> float:
@@ -207,27 +339,30 @@ def analyze_severity(
     error_title: str,
     error_description: str = "",
     stack_trace: str = "",
-    environment: str = None
+    environment: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> str:
     """
     Analyze error severity (convenience function).
-    
+
     Args:
-        error_title: Error title/message
+        error_title:       Error title/message
         error_description: Error description (optional)
-        stack_trace: Stack trace (optional)
-        environment: Environment name (optional)
-        
+        stack_trace:       Stack trace (optional)
+        environment:       Environment name (optional)
+        project_id:        Project ID for LLM-based classification (optional)
+
     Returns:
         Severity string: "CRITICAL", "HIGH", "MEDIUM", or "LOW"
     """
-    analyzer = SeverityAnalyzer()
-    
+    analyzer = SeverityAnalyzer(project_id=project_id)
+
     severity, confidence = analyzer.analyze_severity(
         error_title=error_title,
         error_description=error_description or "",
         stack_trace=stack_trace or "",
-        app_name=None
+        app_name=None,
+        environment=environment,
     )
     
     return severity.value
