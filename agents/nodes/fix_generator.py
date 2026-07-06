@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Code fix generation node using LLM."""
 import logging
 from datetime import datetime
@@ -44,6 +60,12 @@ def generate_fix_node(state: AgentState) -> AgentState:
         error_file_type = state.get('error_file_type')
         repo_full_name = state.get('repo_full_name')
         file_type_key = error_file_type or 'code'
+
+        # Technology context (set by OTLP parser via metadata)
+        metadata = state.get('metadata') or {}
+        source_technology = metadata.get('source_technology', 'unknown')
+        detected_framework = metadata.get('detected_framework') or ''
+        tech_display = source_technology + (f'/{detected_framework}' if detected_framework else '')
         
         # Log metadata status
         logger.info(f"[Fix Generation] GitHub metadata from state:")
@@ -107,15 +129,15 @@ def generate_fix_node(state: AgentState) -> AgentState:
             except Exception as fetch_error:
                 logger.error(f"[Fix Generation] ✗ Code fetch failed: {fetch_error}")
 
-        # Fetch full MuleSoft project context (all flow XML + DWL scripts) for richer fix
+        # Fetch MuleSoft project context only for MuleSoft/Java apps (all XML + DWL)
         project_files: dict = {}
-        if repo_full_name:
+        if repo_full_name and source_technology in ('mulesoft', 'java', 'unknown'):
             try:
                 project_files = code_fetcher.fetch_mulesoft_project_context(repo_full_name)
                 logger.info(f"[Fix Generation] ✓ Fetched {len(project_files)} MuleSoft project files")
             except Exception as ctx_err:
                 logger.warning(f"[Fix Generation] Could not fetch project context: {ctx_err}")
-        else:
+        elif not repo_full_name:
             logger.warning(f"[Fix Generation] ✗ Missing GitHub metadata (repo={repo_full_name}, file={error_file_path})")
         
         if not code_context:
@@ -135,15 +157,30 @@ def generate_fix_node(state: AgentState) -> AgentState:
         code_context_data = code_context
         fix_prompt = prompts['code_fix_generation']
         
-        # Determine file type specific instructions
+        # Technology-aware fix instructions
         file_type_instructions = {
-            'dataweave': "Fix the DataWeave transformation. Ensure proper null handling and type conversions.",
-            'mule_xml': "Fix the Mule flow XML. Ensure proper error handling and flow logic.",
-            'yaml': "Fix the YAML configuration. Ensure proper indentation and syntax.",
-            'java': "Fix the Java code. Ensure proper null checks and exception handling."
+            # MuleSoft / Java
+            'dataweave':  "Fix the DataWeave transformation. Ensure proper null handling, type coercions, and default values.",
+            'mule_xml':   "Fix the Mule flow XML. Ensure proper error handling, flow logic, and connector configuration.",
+            'yaml':       "Fix the YAML configuration. Ensure proper indentation, syntax, and valid values.",
+            'java':       "Fix the Java code. Ensure proper null checks, exception handling, and resource cleanup.",
+            'kotlin':     "Fix the Kotlin code. Use idiomatic null-safety operators (?., ?:) and proper coroutine error handling.",
+            'scala':      "Fix the Scala code. Use Option/Either for null safety and proper functional error handling.",
+            'groovy':     "Fix the Groovy code. Use safe navigation operator (?.) and proper try/catch blocks.",
+            # Other languages
+            'python':     "Fix the Python code. Ensure proper exception handling with try/except, check for None values, and use context managers.",
+            'javascript': "Fix the JavaScript/Node.js code. Add proper null/undefined checks, async error handling, and Promise rejection handling.",
+            'typescript': "Fix the TypeScript code. Use strict null checks, proper type guards, and async/await error handling.",
+            'csharp':     "Fix the C# code. Use null-conditional operators (?.), proper async/await patterns, and exception handling.",
+            'go':         "Fix the Go code. Handle all error return values, check for nil pointers, and use defer for cleanup.",
+            'ruby':       "Fix the Ruby code. Add proper rescue blocks, check for nil with &. safe navigation, and add guard clauses.",
+            'php':        "Fix the PHP code. Add null coalescing operators (??), proper try/catch, and input validation.",
+            'rust':       "Fix the Rust code. Use Result/Option properly, handle all match arms, and avoid unwrap() in production paths.",
         }
-        
-        specific_instruction = file_type_instructions.get(file_type_key, "Fix the code issue.")
+        specific_instruction = file_type_instructions.get(
+            file_type_key,
+            f"Fix the {tech_display} code. Follow language best practices for error handling and null safety."
+        )
         
         full_code_for_storage = code_context_data["full_content"]
         prompt_code_context = _trim_text(code_context_data["full_content"], 12000)
@@ -178,6 +215,7 @@ def generate_fix_node(state: AgentState) -> AgentState:
 
 ## Error Context
 **Error Title:** {state['error_title']}
+**Technology Stack:** {tech_display}
 **File:** {error_file_path}
 **Line:** {error_line_number}
 **File Type:** {error_file_type}
@@ -283,11 +321,28 @@ output application/json
 [Explain what was changed and why it fixes the issue]
 """
         
-        # Generate fix
-        logger.info(f"[Fix Generation] Calling LLM ({llm_provider.provider})")
+        # Generate fix — system message is technology-aware
+        _tech_expertise = {
+            'mulesoft':    'MuleSoft/Anypoint Platform, DataWeave, and Mule 4 flows',
+            'java':        'Java/Spring Boot, JVM ecosystems',
+            'python':      'Python, Django/FastAPI/Flask',
+            'nodejs':      'Node.js/JavaScript/TypeScript, Express/NestJS',
+            'dotnet':      'C#/.NET, ASP.NET Core',
+            'go':          'Go, Gin/Echo/Fiber',
+            'ruby':        'Ruby, Ruby on Rails',
+            'php':         'PHP, Laravel/Symfony',
+            'rust':        'Rust, Actix/Axum',
+        }
+        expertise = _tech_expertise.get(source_technology, 'multiple programming languages')
+        system_msg = (
+            f"You are an expert software engineer specializing in {expertise}. "
+            "Generate safe, production-ready code fixes. "
+            "Always use idiomatic patterns for the target language."
+        )
+        logger.info(f"[Fix Generation] Calling LLM ({llm_provider.provider}) for {tech_display}")
         fix_response = llm_provider.invoke(
             prompt=formatted_prompt,
-            system_message="You are an expert software engineer specializing in Java, MuleSoft, and DataWeave. Generate safe, production-ready code fixes."
+            system_message=system_msg,
         )
         
         # Parse response to extract explanation but KEEP FULL RESPONSE for patch generation

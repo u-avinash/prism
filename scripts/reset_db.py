@@ -1,4 +1,20 @@
 """
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
+"""
 reset_db.py — Complete database reset script.
 Clears all data from all tables including telemetry_logs and project_integration_configs.
 Safe to run while the app is running (uses WAL mode + timeout).

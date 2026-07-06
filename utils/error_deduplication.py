@@ -1,7 +1,24 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Error fingerprinting and deduplication using simhash."""
 import hashlib
 import re
-from typing import Tuple
+from typing import Tuple, Optional
+from datetime import datetime, timedelta
 from config.settings import get_settings
 import logging
 
@@ -15,7 +32,7 @@ class ErrorDeduplicator:
     Uses simhash algorithm for similarity detection.
     """
     
-    def __init__(self, threshold: float = None):
+    def __init__(self, threshold: Optional[float] = None):
         """
         Initialize deduplicator.
         
@@ -188,18 +205,129 @@ class ErrorDeduplicator:
 def deduplicate_error(error_title: str, stack_trace: str = "", app_name: str = "") -> str:
     """
     Generate a fingerprint for an error (convenience function).
-    
+
+    Uses SimHash as primary fingerprint.  The semantic similarity check
+    (LLM-based) is run separately via `check_semantic_duplicate()` for
+    cases where SimHash produces a miss on semantically identical errors
+    with slightly different messages (e.g. different line numbers).
+
     Args:
         error_title: Error title/message
         stack_trace: Stack trace (optional)
         app_name: Application name (optional, can be included in fingerprint)
-        
+
     Returns:
         Fingerprint string
     """
     deduplicator = ErrorDeduplicator()
-    
-    # Combine error info for fingerprinting
     error_text = f"{app_name}:{error_title}" if app_name else error_title
-    
     return deduplicator.generate_fingerprint(error_text, stack_trace or "")
+
+
+def check_semantic_duplicate(
+    error_title: str,
+    stack_trace: str,
+    app_name: str,
+    project_id: Optional[str] = None,
+    max_candidates: int = 5,
+    similarity_threshold: float = 0.85,
+) -> Optional[str]:
+    """
+    LLM-based semantic duplicate detection.
+
+    After SimHash deduplication misses a match (different line numbers,
+    slightly rephrased message, etc.), this function asks the LLM whether
+    the new error is semantically identical to any recent open incident
+    for the same app.
+
+    Returns the incident_id of the matching duplicate, or None.
+
+    This function is best-effort — failures return None silently.
+    """
+    try:
+        from storage.database import get_session
+        from storage.database import Incident
+
+        cutoff = datetime.utcnow() - timedelta(days=7)
+
+        with get_session() as db:
+            candidates = (
+                db.query(Incident)
+                .filter(
+                    Incident.app_name == app_name,
+                    Incident.created_at >= cutoff,
+                    Incident.status.notin_(["COMPLETED", "REJECTED", "FAILED"]),
+                )
+                .order_by(Incident.created_at.desc())
+                .limit(max_candidates)
+                .all()
+            )
+
+        if not candidates:
+            return None
+
+        # Avoid an LLM call if the titles are clearly different
+        deduplicator = ErrorDeduplicator()
+        for cand in candidates:
+            fp_new = deduplicator.generate_fingerprint(
+                f"{app_name}:{error_title}", stack_trace or ""
+            )
+            fp_cand = deduplicator.generate_fingerprint(
+                f"{app_name}:{cand.error_title or ''}", cand.stack_trace or ""
+            )
+            sim = deduplicator.calculate_similarity(fp_new, fp_cand)
+            if sim >= similarity_threshold:
+                logger.info(
+                    "[SemanticDedup] SimHash similarity %.2f >= threshold %.2f → duplicate of %s",
+                    sim, similarity_threshold, cand.incident_id,
+                )
+                return cand.incident_id
+
+        # SimHash didn't find a match — try LLM semantic comparison
+        try:
+            from integrations.llm_provider import LLMProvider
+            llm = LLMProvider(project_id=project_id)
+
+            cand_list = "\n".join(
+                f"ID={c.incident_id}: {(c.error_title or '')[:120]}"
+                for c in candidates
+            )
+            prompt = f"""You are deduplicating software error incidents.
+
+NEW ERROR:
+{error_title[:300]}
+
+STACK TRACE (first 400 chars):
+{stack_trace[:400]}
+
+EXISTING OPEN INCIDENTS FOR APP '{app_name}':
+{cand_list}
+
+Do any of the existing incidents describe the SAME root bug as the new error?
+Consider two errors the same if they share the same exception type and affected code area,
+even if the exact message or line number differs slightly.
+
+Respond with ONLY the incident ID (e.g. "A7CB") if there is a match, or "NONE" if no match.
+Respond with exactly one word."""
+
+            response = llm.invoke(
+                prompt=prompt,
+                system_message="You are a duplicate detection engine. Respond with only an incident ID or NONE.",
+                temperature=0.0,
+            ).strip()
+
+            if response and response.upper() != "NONE" and len(response) <= 6:
+                # Validate the returned ID is actually one of our candidates
+                candidate_ids = {c.incident_id for c in candidates}
+                if response in candidate_ids:
+                    logger.info("[SemanticDedup] LLM matched new error to existing incident %s", response)
+                    return response
+
+        except Exception as llm_exc:
+            logger.debug("[SemanticDedup] LLM check failed (non-critical): %s", llm_exc)
+
+        return None
+
+    except Exception as exc:
+        logger.debug("[SemanticDedup] Semantic duplicate check failed (non-critical): %s", exc)
+        return None

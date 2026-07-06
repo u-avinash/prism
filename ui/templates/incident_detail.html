@@ -1,10 +1,26 @@
+<!--
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+-->
 {% extends "base.html" %}
 {% block title %}{{ inc.incident_id }} — Prism{% endblock %}
 {% block topbar_title %}Incident Detail{% endblock %}
 
 {% block topbar_actions %}
 <a href="/incidents" class="btn btn-ghost btn-sm">← Back</a>
-<button class="btn btn-ghost btn-sm" id="refreshBtn" title="Refresh data">↻ Refresh</button>
+<button class="btn btn-ghost btn-sm" id="refreshBtn" title="Refresh page data" onclick="window.location.reload()">↻ Refresh</button>
 {% if inc.status not in ('COMPLETED', 'PR_CREATED', 'APPROVED', 'REJECTED', 'FAILED', 'PATCH_GENERATING', 'CREATING_JIRA_PR') and inc.approval_status not in ('approved', 'rejected') %}
 <button class="btn btn-secondary btn-sm" id="triggerBtn" data-incident="{{ inc.incident_id }}">⚡ Re-trigger</button>
 {% endif %}
@@ -39,10 +55,44 @@
         <div style="font-size:.67rem;font-weight:700;color:var(--gray-400);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Repository</div>
         <div style="font-size:.82rem;font-weight:600;color:var(--gray-800);word-break:break-all;">{{ inc.repo_full_name or 'Not linked' }}</div>
       </div>
-        <div style="padding:10px 14px;border:1px solid var(--gray-200);border-radius:12px;background:var(--gray-50);">
+      <div style="padding:10px 14px;border:1px solid var(--gray-200);border-radius:12px;background:var(--gray-50);">
         <div style="font-size:.67rem;font-weight:700;color:var(--gray-400);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Current Node</div>
         <div style="font-size:.82rem;font-weight:600;color:var(--gray-800);">{{ current_node_label or 'Waiting' }}</div>
       </div>
+      {% if inc.sla_resolution_due_at %}
+      {% set _inc_terminal = inc.status in ('COMPLETED', 'PR_CREATED', 'REJECTED', 'FAILED', 'JIRA_CREATED') %}
+      {% set _sla_color_border = '#fecaca' if inc.sla_status == 'BREACHED' else ('#fde68a' if inc.sla_status == 'AT_RISK' else '#bbf7d0') %}
+      {% set _sla_color_bg = '#fef2f2' if inc.sla_status == 'BREACHED' else ('#fffbeb' if inc.sla_status == 'AT_RISK' else '#f0fdf4') %}
+      {% set _sla_color_text = '#dc2626' if inc.sla_status == 'BREACHED' else ('#d97706' if inc.sla_status == 'AT_RISK' else '#059669') %}
+      <div style="padding:10px 14px;border:1px solid {{ _sla_color_border }};border-radius:12px;background:{{ _sla_color_bg }};">
+        <div style="font-size:.67rem;font-weight:700;color:var(--gray-400);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">SLA</div>
+        {% if _inc_terminal %}
+          {# Terminal state: show final outcome — no countdown #}
+          {% if inc.sla_status == 'MET' %}
+          <div style="font-size:.82rem;font-weight:700;color:#059669;">✓ MET</div>
+          <div style="font-size:.68rem;color:var(--gray-500);margin-top:2px;">Resolved within deadline</div>
+          {% elif inc.sla_status == 'BREACHED' %}
+          <div style="font-size:.82rem;font-weight:700;color:#dc2626;">✕ BREACHED</div>
+          <div style="font-size:.68rem;color:var(--gray-500);margin-top:2px;">Deadline was missed</div>
+          {% else %}
+          <div style="font-size:.82rem;font-weight:600;color:{{ _sla_color_text }};">{{ inc.sla_status or 'RESOLVED' }}</div>
+          <div style="font-size:.68rem;color:var(--gray-500);margin-top:2px;">Incident closed</div>
+          {% endif %}
+        {% else %}
+          {# Active incident: show live countdown #}
+          <div style="font-size:.82rem;font-weight:600;color:{{ _sla_color_text }};" id="slaCountdown">
+            {{ inc.sla_status or 'ON TRACK' }}
+          </div>
+          <div style="font-size:.68rem;color:var(--gray-500);margin-top:2px;" id="slaTimeLeft">—</div>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if inc.approval_status == 'rejected' and inc.rejection_reason_code %}
+      <div style="padding:10px 14px;border:1px solid #fecaca;border-radius:12px;background:#fef2f2;">
+        <div style="font-size:.67rem;font-weight:700;color:var(--gray-400);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Rejection Reason</div>
+        <div style="font-size:.78rem;font-weight:600;color:#dc2626;">{{ inc.rejection_reason_code.replace('_', ' ').title() }}</div>
+      </div>
+      {% endif %}
     </div>
     {% if patch_artifact or pdf_artifact %}
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--gray-100);">
@@ -492,10 +542,47 @@
             <div style="font-size:.73rem;color:var(--gray-600);margin-top:1px;">Approving resumes downstream automation. Rejecting halts the workflow and records the decision.</div>
           </div>
           <div style="padding:18px;display:flex;flex-direction:column;gap:14px;">
+
+            {% if inc.fix_quality_score is not none %}
+            <!-- Fix Confidence Card -->
+            {% set qs = (inc.fix_quality_score * 100) | int %}
+            <div style="padding:14px;border:1px solid {% if qs >= 70 %}#bbf7d0{% elif qs >= 45 %}#fde68a{% else %}#fecaca{% endif %};border-radius:12px;background:{% if qs >= 70 %}#f0fdf4{% elif qs >= 45 %}#fffbeb{% else %}#fef2f2{% endif %};">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;">
+                <div style="font-size:.83rem;font-weight:700;color:var(--gray-800);">Fix Confidence Score</div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <div style="font-size:1.25rem;font-weight:800;color:{% if qs >= 70 %}#059669{% elif qs >= 45 %}#d97706{% else %}#dc2626{% endif %};">{{ qs }}%</div>
+                  <span class="badge {% if qs >= 70 %}badge-success{% elif qs >= 45 %}badge-warning{% else %}badge-error{% endif %}">
+                    {% if qs >= 70 %}Approve{% elif qs >= 45 %}Review Carefully{% else %}High Risk{% endif %}
+                  </span>
+                </div>
+              </div>
+              <div style="background:rgba(0,0,0,.07);border-radius:4px;height:8px;overflow:hidden;margin-bottom:8px;">
+                <div style="height:8px;border-radius:4px;background:{% if qs >= 70 %}#059669{% elif qs >= 45 %}#d97706{% else %}#dc2626{% endif %};width:{{ qs }}%;transition:width .4s;"></div>
+              </div>
+              <div style="font-size:.72rem;color:var(--gray-600);">Composite score from correctness, safety, code quality, and completeness evaluation.</div>
+            </div>
+            {% endif %}
+
             <div style="display:flex;flex-direction:column;gap:4px;">
               <label style="font-size:.78rem;font-weight:600;color:var(--gray-700);" for="approvalNotes">Notes (optional)</label>
-              <textarea id="approvalNotes" name="notes" class="input" rows="4" placeholder="Add review notes…" style="resize:vertical;"></textarea>
+              <textarea id="approvalNotes" name="notes" class="input" rows="3" placeholder="Add review notes…" style="resize:vertical;"></textarea>
             </div>
+
+            <!-- Rejection reason (shown only when Reject is clicked) -->
+            <div id="rejectionReasonGroup" style="display:none;flex-direction:column;gap:4px;">
+              <label style="font-size:.78rem;font-weight:600;color:#dc2626;" for="rejectionReasonSelect">Rejection Reason <span style="color:#dc2626;">*</span></label>
+              <select id="rejectionReasonSelect" class="input" style="background:#fff;">
+                <option value="">— Select a reason —</option>
+                <option value="wrong_root_cause">Wrong root cause identified</option>
+                <option value="wrong_approach">Root cause correct, approach wrong</option>
+                <option value="breaks_functionality">Fix would break existing functionality</option>
+                <option value="incomplete_fix">Fix is incomplete / misses edge cases</option>
+                <option value="expected_behaviour">Expected behaviour — not a bug</option>
+                <option value="needs_architecture">Requires architectural change, not a hotfix</option>
+                <option value="other">Other (see notes above)</option>
+              </select>
+            </div>
+
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
               <button type="button" class="btn btn-success" id="approveBtn" data-action="approve" data-incident="{{ inc.incident_id }}">✓ Approve Fix</button>
               <button type="button" class="btn btn-danger" id="rejectBtn" data-action="reject" data-incident="{{ inc.incident_id }}">✕ Reject</button>
@@ -655,6 +742,49 @@
         </div>
       </div>
 
+      <!-- Incident group + recurring pattern -->
+      {% set meta = inc.incident_metadata or {} %}
+      {% if inc.incident_group_id or meta.get('recurring_pattern') %}
+      <div style="background:#fff;border:1px solid {% if meta.get('recurring_pattern') %}#fde68a{% else %}var(--gray-200){% endif %};border-radius:14px;overflow:hidden;box-shadow:var(--shadow-sm);">
+        <div style="padding:12px 16px;border-bottom:1px solid var(--gray-200);background:{% if meta.get('recurring_pattern') %}#fffbeb{% else %}var(--gray-50){% endif %};">
+          <div style="font-size:.87rem;font-weight:600;color:var(--gray-800);">
+            {% if meta.get('recurring_pattern') %}⚠️ Recurring Pattern{% else %}📎 Incident Group{% endif %}
+          </div>
+        </div>
+        <div style="padding:12px 14px;font-size:.8rem;color:var(--gray-700);">
+          {% if meta.get('recurring_pattern') %}
+          <p style="margin:0 0 6px;color:#d97706;font-weight:600;">This error has occurred 3+ times in the past 7 days.</p>
+          <p style="margin:0;color:var(--gray-600);">Previous fixes may not have fully resolved the root cause. Consider requesting an architectural review.</p>
+          {% endif %}
+          {% if inc.incident_group_id and inc.incident_group_id != inc.incident_id %}
+          <p style="margin:{% if meta.get('recurring_pattern') %}8px{% else %}0{% endif %} 0 0;">
+            Grouped under primary incident:
+            <a href="/incidents/{{ inc.incident_group_id }}" class="link" style="font-weight:700;">{{ inc.incident_group_id }}</a>
+          </p>
+          {% elif inc.incident_group_id == inc.incident_id %}
+          <p style="margin:{% if meta.get('recurring_pattern') %}8px{% else %}0{% endif %} 0 0;color:var(--gray-600);">This is the <strong>primary incident</strong> in its group.</p>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Suggested unit test (from test_suggester node) -->
+      {% if meta.get('suggested_test') %}
+      <div style="background:#fff;border:1px solid #bbf7d0;border-radius:14px;overflow:hidden;box-shadow:var(--shadow-sm);">
+        <div style="padding:12px 16px;border-bottom:1px solid #bbf7d0;background:#f0fdf4;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <div>
+            <div style="font-size:.87rem;font-weight:600;color:var(--gray-800);">🧪 Suggested Unit Test</div>
+            <div style="font-size:.73rem;color:var(--gray-500);margin-top:1px;">{{ meta.get('suggested_test_framework', 'Auto-generated') }} — would have caught this bug</div>
+          </div>
+          <span class="badge badge-success">Optional for PR</span>
+        </div>
+        <div style="padding:14px;">
+          <pre style="background:var(--gray-900);color:#e2e8f0;border-radius:8px;padding:12px 14px;font-size:.75rem;line-height:1.6;overflow-x:auto;white-space:pre-wrap;word-break:break-word;margin:0;">{{ meta.get('suggested_test') }}</pre>
+          <div style="margin-top:8px;font-size:.73rem;color:var(--gray-500);">Include this test in your PR to prevent regression. Not committed automatically.</div>
+        </div>
+      </div>
+      {% endif %}
+
       <!-- Workflow improvements -->
       <div style="background:#fff;border:1px solid var(--gray-200);border-radius:14px;overflow:hidden;box-shadow:var(--shadow-sm);">
         <div style="padding:12px 16px;border-bottom:1px solid var(--gray-200);background:var(--gray-50);">
@@ -697,23 +827,79 @@
     });
   });
 
-  // Approval buttons
+  // ── SLA countdown timer ────────────────────────────────────────────────────
+  (function () {
+    var slaRaw = '{{ inc.sla_resolution_due_at or "" }}';
+    var countdownEl = document.getElementById('slaCountdown');
+    var timeLeftEl = document.getElementById('slaTimeLeft');
+    if (!slaRaw || !timeLeftEl) return;
+
+    var dueTs = new Date(slaRaw.replace(' ', 'T') + (slaRaw.indexOf('T') === -1 ? 'Z' : '')).getTime();
+
+    function updateCountdown() {
+      var now = Date.now();
+      var diff = dueTs - now;
+      var absDiff = Math.abs(diff);
+      var h = Math.floor(absDiff / 3600000);
+      var m = Math.floor((absDiff % 3600000) / 60000);
+      var s = Math.floor((absDiff % 60000) / 1000);
+      var label = diff < 0 ? 'Overdue by ' : '';
+      timeLeftEl.textContent = label + (h > 0 ? h + 'h ' : '') + m + 'm ' + s + 's';
+
+      if (diff < 0 && countdownEl) {
+        countdownEl.textContent = 'BREACHED';
+        countdownEl.style.color = '#dc2626';
+      } else if (diff < 1800000 && countdownEl) {
+        countdownEl.textContent = 'AT RISK';
+        countdownEl.style.color = '#d97706';
+      }
+    }
+    updateCountdown();
+    setInterval(updateCountdown, 1000);
+  })();
+
+  // ── Show rejection reason group when Reject is clicked ────────────────────
+  var rejectBtn = document.getElementById('rejectBtn');
+  var approveBtn = document.getElementById('approveBtn');
+  var rejectionReasonGroup = document.getElementById('rejectionReasonGroup');
+
+  if (rejectBtn && rejectionReasonGroup) {
+    rejectBtn.addEventListener('click', function () {
+      rejectionReasonGroup.style.display = 'flex';
+      rejectionReasonGroup.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  }
+
+  // ── Approval / rejection submit ────────────────────────────────────────────
   function doApproval(action) {
     var notes = (document.getElementById('approvalNotes') || {}).value || '';
+    var rejectionReason = (document.getElementById('rejectionReasonSelect') || {}).value || '';
     var incidentId = '{{ inc.incident_id }}';
-    var btn = action === 'approve' ? document.getElementById('approveBtn') : document.getElementById('rejectBtn');
+
+    if (action === 'reject' && !rejectionReason) {
+      var sel = document.getElementById('rejectionReasonSelect');
+      if (sel) { sel.focus(); sel.style.borderColor = '#dc2626'; }
+      alert('Please select a rejection reason before rejecting.');
+      return;
+    }
+
+    var btn = action === 'approve' ? approveBtn : rejectBtn;
     if (btn) { btn.disabled = true; btn.textContent = action === 'approve' ? 'Approving…' : 'Rejecting…'; }
+
+    var body = 'action=' + encodeURIComponent(action) +
+               '&notes=' + encodeURIComponent(notes) +
+               '&rejection_reason_code=' + encodeURIComponent(rejectionReason);
+
     fetch('/api/incidents/' + incidentId + '/approve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'action=' + encodeURIComponent(action) + '&notes=' + encodeURIComponent(notes)
+      body: body
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d.ok) {
         if (action === 'approve') {
-          // Trigger post-approval workflow: patch → notifications → Jira → PR → finalize
           if (btn) { btn.textContent = 'Running workflow…'; }
           fetch('/api/incidents/' + incidentId + '/continue-post-approval', { method: 'POST' })
-            .catch(function () { /* non-fatal — workflow may still run */ })
+            .catch(function () {})
             .finally(function () { window.location.reload(); });
         } else {
           window.location.reload();
@@ -727,10 +913,17 @@
       alert('Request failed.');
     });
   }
-  var approveBtn = document.getElementById('approveBtn');
-  var rejectBtn = document.getElementById('rejectBtn');
+
   if (approveBtn) approveBtn.addEventListener('click', function () { doApproval('approve'); });
-  if (rejectBtn) rejectBtn.addEventListener('click', function () { doApproval('reject'); });
+  // rejectBtn click is handled above (shows dropdown first); submit happens via confirmReject
+  // Allow clicking Reject again after dropdown is visible to actually submit
+  if (rejectBtn) {
+    rejectBtn.addEventListener('click', function () {
+      var reason = (document.getElementById('rejectionReasonSelect') || {}).value || '';
+      if (reason) { doApproval('reject'); }
+      // else: dropdown was just revealed — wait for user to pick a reason and click again
+    });
+  }
 
   // Re-trigger button
   var triggerBtn = document.getElementById('triggerBtn');

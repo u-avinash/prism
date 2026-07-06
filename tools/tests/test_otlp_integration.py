@@ -1,4 +1,20 @@
 """
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
+"""
 Test script for OTLP (OpenTelemetry Protocol) integration.
 
 This script demonstrates how to send OTLP-formatted telemetry (logs, traces, metrics)

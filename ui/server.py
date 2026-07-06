@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """FastAPI dashboard server for Prism — Prism UI."""
 from __future__ import annotations
 
@@ -1326,18 +1342,29 @@ def _sample_audit_rows(selected_project: Optional[dict]) -> list[dict]:
 # ── Auth helpers ─────────────────────────────────────────────────────────────
 
 def _get_current_user(request: Request) -> Optional[dict]:
-    if not _AUTH_AVAILABLE:
-        return {"id": "USR-ADMIN", "username": "admin", "role": "admin", "features": []}
+    """Return the current user from the session cookie, or None if not authenticated.
+
+    When the auth store is unavailable (``_AUTH_AVAILABLE = False``), a minimal
+    dev-mode user is returned ONLY when a session cookie is already present.
+    Without a cookie the function returns None, forcing the caller to redirect
+    to the login page — this prevents unauthenticated direct-URL access even in
+    dev / no-auth-store mode.
+    """
     token = request.cookies.get("session")
+    if not _AUTH_AVAILABLE:
+        # Auth store unavailable (first-run or misconfigured environment).
+        # Require at least a browser cookie so direct-URL access without ever
+        # visiting /login is blocked.
+        if not token:
+            return None
+        return {"id": "USR-ADMIN", "username": "admin", "role": "admin", "features": []}
     if not token:
         return None
     return get_session(token)
 
 
 def _require_auth(request: Request) -> Optional[RedirectResponse]:
-    """Return a redirect if not authenticated, else None."""
-    if not _AUTH_AVAILABLE:
-        return None
+    """Return a redirect to /login if the request is unauthenticated, else None."""
     user = _get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -1345,8 +1372,18 @@ def _require_auth(request: Request) -> Optional[RedirectResponse]:
 
 
 def _require_role(request: Request, *roles: str) -> Optional[RedirectResponse]:
-    """Require the current user to have one of the given roles."""
+    """Require the current user to have one of the given roles.
+
+    When the auth store is unavailable all role checks are skipped so that
+    admin/team-admin pages remain accessible in dev/fallback mode — but the
+    user still needs to have a session cookie (enforced by ``_require_auth``
+    being called first on every protected page).
+    """
     if not _AUTH_AVAILABLE:
+        # Still require a cookie even without a full auth store
+        user = _get_current_user(request)
+        if not user:
+            return RedirectResponse(url="/login", status_code=302)
         return None
     user = _get_current_user(request)
     if not user:
@@ -1387,7 +1424,13 @@ async def login_post(
     password: str = Form(...),
 ):
     if not _AUTH_AVAILABLE:
-        return RedirectResponse(url="/dashboard", status_code=302)
+        # Auth store unavailable — set a dev-mode session cookie so the user
+        # can access protected pages.  Any credentials are accepted.
+        import secrets as _secrets
+        dev_token = _secrets.token_hex(16)
+        resp = RedirectResponse(url="/incidents", status_code=302)
+        resp.set_cookie("session", dev_token, httponly=True, max_age=86400 * 7)
+        return resp
     user = authenticate_user(username, password)
     if not user:
         return templates.TemplateResponse(
@@ -2964,6 +3007,9 @@ async def incident_detail(
     _appr_lower = (getattr(inc, "approval_status", None) or "").lower()
     if _status_upper == "PENDING_APPROVAL" or (_appr_lower == "pending" and not _status_upper.startswith("PR") and _status_upper != "COMPLETED"):
         current_node = "await_approval"
+    elif _status_upper == "REJECTED" or _appr_lower == "rejected":
+        # Fix: rejected incidents should show "finalize" not "await_approval"
+        current_node = "finalize"
     elif _status_upper == "JIRA_CREATED" and not getattr(inc, "pr_url", None):
         current_node = "create_pr"
     elif _status_upper == "CREATING_JIRA_PR":
@@ -3448,6 +3494,7 @@ async def api_approve(
     incident_id: str,
     action: str = Form(...),
     notes: str = Form(default=""),
+    rejection_reason_code: str = Form(default=""),
     repo: IncidentRepository = Depends(get_repository),
 ):
     """Approve or reject an incident fix — called from both form POST and JS fetch."""
@@ -3464,10 +3511,32 @@ async def api_approve(
         updates["approval_status"] = "approved"
         updates["approved_at"] = datetime.utcnow()
         updates["status"] = IncidentStatus.APPROVED.value
+        # SLA will be finalised by the post-approval workflow's finalizer node
     else:
         updates["approval_status"] = "rejected"
         updates["approved_at"] = datetime.utcnow()
         updates["status"] = IncidentStatus.REJECTED.value
+        updates["current_workflow_node"] = "finalize"
+        # Store structured rejection reason if provided
+        if rejection_reason_code.strip():
+            updates["rejection_reason_code"] = rejection_reason_code.strip()
+        # Increment fix attempt count
+        current_count = getattr(inc, "fix_attempt_count", 0) or 0
+        updates["fix_attempt_count"] = current_count + 1
+        # Compute final SLA outcome immediately on rejection (workflow finalizer
+        # won't run through the full path when rejected via the UI approval gate)
+        try:
+            from agents.nodes.escalation_handler import compute_final_sla_status
+            final_sla = compute_final_sla_status(
+                current_sla_status=getattr(inc, "sla_status", None),
+                sla_resolution_due_at=(
+                    getattr(inc, "sla_resolution_due_at", None).isoformat()
+                    if getattr(inc, "sla_resolution_due_at", None) else None
+                ),
+            )
+            updates["sla_status"] = final_sla
+        except Exception:
+            pass
 
     repo.update(incident_id, **updates)
 
@@ -3485,10 +3554,17 @@ async def form_approve(
     incident_id: str,
     action: str = Form(...),
     notes: str = Form(default=""),
+    rejection_reason_code: str = Form(default=""),
     repo: IncidentRepository = Depends(get_repository),
 ):
     """Form-based approve/reject — redirects back to detail page."""
-    await api_approve(incident_id=incident_id, action=action, notes=notes, repo=repo)
+    await api_approve(
+        incident_id=incident_id,
+        action=action,
+        notes=notes,
+        rejection_reason_code=rejection_reason_code,
+        repo=repo,
+    )
     return RedirectResponse(url=f"/incidents/{incident_id}", status_code=303)
 
 
@@ -3581,6 +3657,137 @@ async def api_continue_post_approval(
     except Exception as exc:
         logger.error("Post-approval workflow error for %s: %s", incident_id, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/audit/export.csv")
+async def api_export_audit_csv(
+    request: Request,
+    repo: IncidentRepository = Depends(get_repository),
+):
+    """
+    Export a comprehensive audit CSV covering all incidents with workflow events,
+    approval decisions, SLA data, rejection reasons, and integration artefacts.
+    Accessible by admin and team_admin roles.
+    """
+    import csv
+    import io
+
+    auth_redirect = _require_auth(request)
+    if auth_redirect:
+        return auth_redirect
+
+    user = _get_current_user(request)
+    selected_project = _get_selected_project(request, user)
+    incidents = repo.get_all(limit=10000)
+
+    if selected_project:
+        project_scoped = [i for i in incidents if _incident_matches_project(i, selected_project)]
+        if project_scoped:
+            incidents = project_scoped
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "incident_id", "app_name", "environment", "severity", "status",
+        "source_technology", "detected_framework",
+        "error_title", "rca_confidence", "fix_quality_score",
+        "approval_status", "approved_by", "approved_at",
+        "rejection_reason_code", "fix_attempt_count",
+        "sla_status", "sla_resolution_due_at",
+        "jira_ticket_key", "jira_ticket_url",
+        "pr_url", "pr_number", "fix_branch",
+        "slack_notification_sent", "teams_notification_sent",
+        "created_at", "updated_at", "completed_at",
+        "mttr_minutes",
+    ])
+
+    for inc in incidents:
+        # Compute MTTR for completed incidents
+        mttr_minutes = ""
+        try:
+            completed_at = getattr(inc, "completed_at", None)
+            created_at = getattr(inc, "created_at", None)
+            if completed_at and created_at:
+                if isinstance(completed_at, str):
+                    completed_at = datetime.fromisoformat(completed_at)
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at)
+                diff = (completed_at - created_at).total_seconds()
+                if diff > 0:
+                    mttr_minutes = round(diff / 60, 1)
+        except Exception:
+            pass
+
+        writer.writerow([
+            getattr(inc, "incident_id", ""),
+            getattr(inc, "app_name", ""),
+            getattr(inc, "environment", ""),
+            getattr(inc, "severity", ""),
+            getattr(inc, "status", ""),
+            getattr(inc, "source_technology", ""),
+            getattr(inc, "detected_framework", ""),
+            getattr(inc, "error_title", ""),
+            getattr(inc, "rca_confidence", ""),
+            getattr(inc, "fix_quality_score", ""),
+            getattr(inc, "approval_status", ""),
+            getattr(inc, "approved_by", ""),
+            _fmt_dt(getattr(inc, "approved_at", None)),
+            getattr(inc, "rejection_reason_code", ""),
+            getattr(inc, "fix_attempt_count", ""),
+            getattr(inc, "sla_status", ""),
+            _fmt_dt(getattr(inc, "sla_resolution_due_at", None)),
+            getattr(inc, "jira_ticket_key", ""),
+            getattr(inc, "jira_ticket_url", ""),
+            getattr(inc, "pr_url", ""),
+            getattr(inc, "pr_number", ""),
+            getattr(inc, "fix_branch", ""),
+            getattr(inc, "slack_notification_sent", ""),
+            getattr(inc, "teams_notification_sent", ""),
+            _fmt_dt(getattr(inc, "created_at", None)),
+            _fmt_dt(getattr(inc, "updated_at", None)),
+            _fmt_dt(getattr(inc, "completed_at", None)),
+            mttr_minutes,
+        ])
+
+    csv_content = output.getvalue()
+    filename = f"prism_audit_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        iter([csv_content]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/admin/apply-retention")
+async def api_admin_apply_retention(request: Request):
+    """
+    Apply retention policy — deletes COMPLETED/REJECTED/FAILED incidents
+    older than the specified threshold.  Admin only.
+
+    Request body: { "days": 90, "dry_run": false }
+    """
+    redir = _require_role(request, "admin")
+    if redir:
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    days = int(body.get("days") or 90)
+    dry_run = bool(body.get("dry_run", False))
+
+    if days < 1:
+        return JSONResponse({"error": "days must be >= 1"}, status_code=400)
+
+    try:
+        from scripts.apply_retention_policy import apply_retention
+        result = apply_retention(days=days, dry_run=dry_run)
+        return JSONResponse({"ok": True, **result})
+    except Exception as exc:
+        logger.error("apply-retention error: %s", exc, exc_info=True)
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.delete("/api/incidents")

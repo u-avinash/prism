@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Workflow finalization node."""
 import logging
 from datetime import datetime
@@ -191,7 +207,50 @@ def finalize_node(state: AgentState) -> AgentState:
                 update_data['pdf_path'] = state.get('pdf_path')
             if state.get('patch_path'):
                 update_data['patch_path'] = state.get('patch_path')
-            
+
+            # Technology detection — persist if available in state
+            metadata = state.get('metadata') or {}
+            if metadata.get('source_technology'):
+                update_data['source_technology'] = metadata['source_technology']
+            if metadata.get('detected_framework'):
+                update_data['detected_framework'] = metadata['detected_framework']
+
+            # SLA status — compute the FINAL outcome for terminal states so the UI
+            # shows MET or BREACHED instead of a stale ON_TRACK / AT_RISK countdown.
+            _terminal_states = {'COMPLETED', 'PR_CREATED', 'REJECTED', 'FAILED', 'JIRA_CREATED'}
+            _sla_due = state.get('sla_resolution_due_at')
+            if _sla_due:
+                try:
+                    update_data['sla_resolution_due_at'] = datetime.fromisoformat(_sla_due)
+                except (ValueError, TypeError):
+                    pass
+
+            if final_status in _terminal_states and _sla_due:
+                try:
+                    from agents.nodes.escalation_handler import compute_final_sla_status
+                    final_sla = compute_final_sla_status(
+                        current_sla_status=state.get('sla_status'),
+                        sla_resolution_due_at=_sla_due,
+                    )
+                    update_data['sla_status'] = final_sla
+                    state['sla_status'] = final_sla
+                    logger.info(
+                        "[Finalizer] Incident %s SLA outcome: %s (status=%s)",
+                        state['incident_id'], final_sla, final_status,
+                    )
+                except Exception as _sla_err:
+                    logger.debug("[Finalizer] Could not compute final SLA: %s", _sla_err)
+                    if state.get('sla_status'):
+                        update_data['sla_status'] = state.get('sla_status')
+            elif state.get('sla_status'):
+                update_data['sla_status'] = state.get('sla_status')
+
+            # Structured rejection feedback
+            if state.get('rejection_reason_code'):
+                update_data['rejection_reason_code'] = state.get('rejection_reason_code')
+            if state.get('fix_attempt_count') is not None:
+                update_data['fix_attempt_count'] = state.get('fix_attempt_count')
+
             repo.update(
                 incident_id=state['incident_id'],
                 **update_data

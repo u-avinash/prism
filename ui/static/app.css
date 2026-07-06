@@ -1,3 +1,19 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║                          P  R  I  S  M                               ║
+ * ║       Autonomous AI Incident Management System                       ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
+ *
+ *   Building an Autonomous AI Incident Management System
+ *   with LangGraph and OpenTelemetry
+ *
+ *   Author   : Upadhyayula Avinash
+ *   GitHub   : https://github.com/u-avinash
+ *   LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+ *   Email    : uavinash.csit@gmail.com
+ *
+ *   Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+ */
 /* PRISM — Log Monitor — Design System */
 :root{
   --prism-400:#a78bfa;--prism-500:#8b5cf6;--prism-600:#7c3aed;--prism-700:#6d28d9;

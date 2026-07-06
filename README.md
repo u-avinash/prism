@@ -1,3 +1,19 @@
+<!--
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+-->
 # Prism — AI-Powered Incident Management Platform
 
 Prism is an autonomous incident management system that ingests OpenTelemetry logs, classifies errors by severity, generates AI-powered Root Cause Analysis (RCA) and code fixes, and orchestrates a human-in-the-loop approval workflow that ends with a Jira ticket and a GitHub Pull Request — all without manual intervention beyond a single approval click.
@@ -207,9 +223,10 @@ prism/
 │   └── customer_store.py      # Customer / environment management
 │
 ├── config/
-│   ├── settings.py            # Pydantic settings (infrastructure only, no secrets)
-│   ├── prompts.yaml           # LLM prompt templates
-│   └── app_repo_mapping.yaml  # Static app-name → GitHub repo overrides
+│   ├── settings.py                  # Pydantic settings (infrastructure only, no secrets)
+│   ├── prompts.yaml                 # LLM prompt templates
+│   ├── app_repo_mapping.yaml        # Static app-name → GitHub repo overrides
+│   └── otel-collector-config.yaml   # OpenTelemetry Collector config (otelcol-contrib 0.153.0)
 │
 ├── utils/
 │   ├── code_fetcher.py        # GitHub file fetching with line context
@@ -257,7 +274,26 @@ pip install -r requirements.txt
 uvicorn ingestion.api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 3. Start the Dashboard UI
+### 3. Start the OpenTelemetry Collector (optional but recommended)
+
+Download **otelcol-contrib** (v0.153.0 or later) from the [OpenTelemetry releases page](https://github.com/open-telemetry/opentelemetry-collector-releases/releases) and run it with the bundled config:
+
+```bash
+# Windows
+otelcol-contrib.exe --config config/otel-collector-config.yaml
+
+# Linux / macOS
+./otelcol-contrib --config config/otel-collector-config.yaml
+```
+
+The collector:
+- Listens for **OTLP/HTTP** on port **4318** (your apps send logs/traces/metrics here)
+- Forwards all signals to the **Prism Ingestion API** on `http://localhost:8000`
+- Exposes a health check on port **13133** (`http://localhost:13133`)
+
+You can also send logs directly to the Prism Ingestion API on port **8000** without running a collector.
+
+### 4. Start the Dashboard UI
 
 ```bash
 uvicorn ui.server:app --host 0.0.0.0 --port 8080 --reload
@@ -269,18 +305,18 @@ Or use the Windows helper:
 restart_prism_app.bat
 ```
 
-### 4. Open the Dashboard
+### 5. Open the Dashboard
 
 Navigate to **http://localhost:8080** and log in with the default admin credentials (see below).
 
-### 5. Create a Project and Configure Integrations
+### 6. Create a Project and Configure Integrations
 
 1. Log in as **admin** → Admin Dashboard → **Onboard Project**
 2. Create a project and assign a Team Admin email
 3. Log in as the Team Admin → **Configure Integrations**
 4. Set up at minimum: **LLM** (required for workflow) and optionally GitHub, Jira, Slack/Teams
 
-### 6. Send a Test Log
+### 7. Send a Test Log
 
 ```bash
 curl -X POST http://localhost:8000/v1/logs \

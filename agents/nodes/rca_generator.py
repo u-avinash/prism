@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Root Cause Analysis generation node using LLM."""
 import logging
 from datetime import datetime
@@ -118,6 +134,20 @@ def generate_rca_node(state: AgentState) -> AgentState:
             else:
                 logger.warning(f"[RCA Generation] Missing repo or file path for code fetch")
         
+        # Inject detected technology into state (from OTLP parser metadata)
+        metadata = state.get('metadata') or {}
+        source_technology = metadata.get('source_technology', 'unknown')
+        detected_framework = metadata.get('detected_framework') or ''
+        if source_technology and source_technology != 'unknown':
+            logger.info("[RCA Generation] Source technology: %s (framework: %s)", source_technology, detected_framework)
+
+        # Collect historical context — similar incidents that were successfully resolved
+        historical_section = _fetch_historical_context(
+            incident_id=state['incident_id'],
+            error_title=state.get('error_title', ''),
+            app_name=state.get('app_name', ''),
+        )
+
         # Fetch Anypoint runtime context if the project has it configured
         anypoint_section = _fetch_anypoint_context(
             project_id=state.get('project_id'),
@@ -149,12 +179,14 @@ def generate_rca_node(state: AgentState) -> AgentState:
             code_section = "[Code not available - GitHub not configured or file not found]"
         
         # Format prompt with incident details, code, and runtime context
+        tech_display = f"{source_technology}" + (f" / {detected_framework}" if detected_framework else "")
         formatted_prompt = f"""{rca_prompt}
 
 ## Incident Details
 **Application:** {state['app_name']}
 **Environment:** {state['environment']}
 **Error Title:** {state['error_title']}
+**Technology Stack:** {tech_display}
 
 ## Error Message
 {state['error_description']}
@@ -168,11 +200,14 @@ def generate_rca_node(state: AgentState) -> AgentState:
 
 {anypoint_section}
 
+{historical_section}
+
 Now provide a comprehensive Root Cause Analysis (400-500 words) that:
-1. Identifies the exact cause based on the actual code
-2. Explains why this error occurred
+1. Identifies the exact cause based on the actual code and technology stack
+2. Explains why this error occurred in the context of {tech_display}
 3. Describes the impact
-4. Provides technical context
+4. Provides technical context specific to {source_technology}
+5. Notes if this matches a previously seen pattern (if historical data is provided)
 """
         
         # Initialize LLM provider with project-scoped configuration
@@ -396,6 +431,71 @@ Respond ONLY with valid JSON (no markdown, no extra text):
             exc, fallback_confidence,
         )
         return fallback_confidence
+
+
+# ---------------------------------------------------------------------------
+# Historical incident context helper
+# ---------------------------------------------------------------------------
+
+def _fetch_historical_context(
+    incident_id: str,
+    error_title: str,
+    app_name: str,
+) -> str:
+    """
+    Query the DB for similar incidents that were approved and resolved.
+    Injects them into the RCA prompt so the LLM can recognise recurring patterns
+    and reference previously successful fixes.
+
+    Returns a formatted Markdown section, or an empty string if nothing useful
+    is found (so it never blocks RCA generation).
+    """
+    try:
+        from storage.database import get_session
+        from storage.incident_repository import IncidentRepository
+
+        with get_session() as session:
+            repo = IncidentRepository(session)
+
+            # Fetch recent completed incidents for the same app
+            recent = repo.get_all(
+                app_name=app_name,
+                status='COMPLETED',
+                limit=5,
+            )
+
+            if not recent:
+                return ""
+
+            # Filter out the current incident and those without RCA
+            similar = [
+                inc for inc in recent
+                if inc.incident_id != incident_id and inc.rca_text
+            ][:3]
+
+            if not similar:
+                return ""
+
+            lines = ["## Historical Context — Similar Resolved Incidents"]
+            for inc in similar:
+                lines.append(
+                    f"\n### Incident {inc.incident_id} — {inc.error_title[:80]}"
+                )
+                lines.append(f"**Resolved:** {inc.updated_at.strftime('%Y-%m-%d') if inc.updated_at else 'N/A'}")
+                if inc.rca_text:
+                    lines.append(f"**RCA Summary:** {inc.rca_text[:300]}...")
+                if inc.fix_explanation:
+                    lines.append(f"**Fix Applied:** {inc.fix_explanation[:200]}...")
+
+            lines.append(
+                "\n*Use the above historical context to identify if this is a recurring pattern "
+                "and whether a previous fix approach applies.*"
+            )
+            return "\n".join(lines)
+
+    except Exception as exc:
+        logger.debug("[RCA] Historical context fetch failed (non-critical): %s", exc)
+        return ""
 
 
 # ---------------------------------------------------------------------------

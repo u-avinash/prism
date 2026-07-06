@@ -1,7 +1,24 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Human approval workflow handler node."""
 import logging
 from datetime import datetime
-from agents.state import AgentState, WORKFLOW_TOTAL_STEPS
+from agents.state import AgentState
+from agents.nodes.node_utils import mark_step_complete
 from storage.database import get_session
 from storage.incident_repository import IncidentRepository
 
@@ -57,31 +74,12 @@ def await_approval_node(state: AgentState) -> AgentState:
         state['current_node'] = 'await_approval'
         state['updated_at'] = datetime.utcnow().isoformat()
         
-        # Update workflow tracking
-        completed_steps = list(state.get('workflow_completed_steps') or [])
+        # Update workflow tracking + persist to DB in a single call
+        mark_step_complete(state, 'await_approval')
         
-        # Add step only if not already completed (prevent duplicates)
-        if 'await_approval' not in completed_steps:
-            completed_steps.append('await_approval')
-        state['workflow_completed_steps'] = completed_steps
-        
-        state['workflow_progress_pct'] = len(completed_steps) / WORKFLOW_TOTAL_STEPS
-        
-        # Update database with workflow progress
-        try:
-            with get_session() as session:
-                repo = IncidentRepository(session)
-                repo.update(
-                    incident_id=state['incident_id'],
-                    current_workflow_node='await_approval',
-                    workflow_completed_steps=state['workflow_completed_steps'],
-                    workflow_progress_pct=state['workflow_progress_pct']
-                )
-        except Exception as db_error:
-            logger.warning(f"Failed to update workflow progress in DB: {db_error}")
-        
+        quality_score = (state.get('overall_quality_score') or 0.0)
         state['messages'] = state.get('messages', []) + [
-            f"⏸️ Awaiting human approval (quality score: {state.get('overall_quality_score', 0):.2f})",
+            f"⏸️ Awaiting human approval (quality score: {quality_score:.2f})",
             f"Requires approval: {state['requires_approval']}"
         ]
         

@@ -1,0 +1,63 @@
+# =============================================================================
+# OpenTelemetry Collector Configuration for Prism
+# =============================================================================
+# Collector version : otelcol-contrib 0.153.0
+# Purpose           : Receives OTLP signals from instrumented applications and
+#                     forwards them to the Prism Ingestion API (port 8000).
+#
+# Usage (Windows):
+#   otelcol-contrib.exe --config config/otel-collector-config.yaml
+#
+# Usage (Linux / macOS):
+#   ./otelcol-contrib --config config/otel-collector-config.yaml
+#
+# The collector listens for OTLP/HTTP on port 4318 and exports all signals
+# (logs, traces, metrics) to the Prism ingestion endpoints on localhost:8000.
+# =============================================================================
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: detailed
+  otlphttp/prism:
+    endpoint: http://localhost:8000
+    logs_endpoint: http://localhost:8000/v1/logs
+    traces_endpoint: http://localhost:8000/v1/traces
+    metrics_endpoint: http://localhost:8000/v1/metrics
+    compression: none
+    encoding: json
+    tls:
+      insecure: true
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  extensions: [health_check]
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlphttp/prism]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlphttp/prism]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlphttp/prism]
+
+

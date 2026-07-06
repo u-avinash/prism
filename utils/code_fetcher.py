@@ -1,8 +1,27 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """Utility to fetch and analyze code from GitHub repositories."""
 import logging
 import re
 from typing import Optional, Dict, Any, List
 from integrations.github_client import GitHubClient
+from ingestion.tech_detector import TechAwarePathResolver
+
+_path_resolver = TechAwarePathResolver()
 
 logger = logging.getLogger(__name__)
 
@@ -313,20 +332,126 @@ class CodeFetcher:
                     'line_number': line_num,
                     'source': 'java_stack'
                 }
-        
+
+        # Pattern 6: Python traceback
+        # Example: File "/app/service.py", line 42, in process_order
+        if not file_info:
+            py_pattern = r'File "([^"]+\.py)", line (\d+)'
+            match = re.search(py_pattern, (stack_trace or "") + "\n" + (raw_log or ""))
+            if match:
+                raw_path = match.group(1)
+                line_num = int(match.group(2))
+                norm_path = re.sub(r'^/(?:app|home|usr/src/app|code|srv|opt/app)/', '', raw_path)
+                file_info = {
+                    'file_path': norm_path,
+                    'line_number': line_num,
+                    'source': 'python_traceback'
+                }
+
+        # Pattern 7: Node.js / V8 stack trace
+        # Example: at OrderService.processOrder (/app/services/order.js:42:7)
+        if not file_info:
+            node_pattern = r'at\s+[\w.<>]+\s+\(([^)]+\.(js|ts|mjs|cjs)):(\d+):\d+\)'
+            match = re.search(node_pattern, (stack_trace or "") + "\n" + (raw_log or ""))
+            if match:
+                raw_path = match.group(1)
+                line_num = int(match.group(3))
+                norm_path = re.sub(r'^/(?:app|home|usr/src/app|code|srv|opt/app)/', '', raw_path)
+                if 'node_modules' not in norm_path:
+                    file_info = {
+                        'file_path': norm_path,
+                        'line_number': line_num,
+                        'source': 'nodejs_stack'
+                    }
+
+        # Pattern 8: .NET / C# stack trace
+        # Example: at OrderService.Process() in /app/Services/OrderService.cs:line 42
+        if not file_info:
+            cs_pattern = r'in ([^:]+\.cs):line (\d+)'
+            match = re.search(cs_pattern, (stack_trace or "") + "\n" + (raw_log or ""))
+            if match:
+                raw_path = match.group(1)
+                line_num = int(match.group(2))
+                norm_path = re.sub(r'^/(?:app|home|src|code)/', '', raw_path)
+                file_info = {
+                    'file_path': norm_path,
+                    'line_number': line_num,
+                    'source': 'dotnet_stack'
+                }
+
+        # Pattern 9: Go stack trace
+        # Example: /home/user/go/src/github.com/org/repo/handler/order.go:42 +0x1a8
+        if not file_info:
+            go_pattern = r'([\w/.-]+\.go):(\d+)\s+\+0x'
+            match = re.search(go_pattern, (stack_trace or "") + "\n" + (raw_log or ""))
+            if match:
+                raw_path = match.group(1)
+                line_num = int(match.group(2))
+                norm_path = re.sub(r'^.*(?:src/|mod/cache/download/)[^/]+/[^/]+/', '', raw_path)
+                if norm_path and '/' in norm_path:
+                    file_info = {
+                        'file_path': norm_path,
+                        'line_number': line_num,
+                        'source': 'go_stack'
+                    }
+
+        # Pattern 10: Ruby backtrace
+        # Example: /app/services/order_service.rb:42:in `process_order'
+        if not file_info:
+            ruby_pattern = r'(/[^\s]+\.rb):(\d+):in `'
+            match = re.search(ruby_pattern, (stack_trace or "") + "\n" + (raw_log or ""))
+            if match:
+                raw_path = match.group(1)
+                line_num = int(match.group(2))
+                norm_path = re.sub(r'^/(?:app|home|usr/src/app|code|srv)/', '', raw_path)
+                file_info = {
+                    'file_path': norm_path,
+                    'line_number': line_num,
+                    'source': 'ruby_stack'
+                }
+
+        # Pattern 11: PHP stack trace
+        # Example: #0 /app/Services/OrderService.php(42): OrderService->processOrder()
+        if not file_info:
+            php_pattern = r'#\d+\s+(/[^\s(]+\.php)\((\d+)\)'
+            match = re.search(php_pattern, (stack_trace or "") + "\n" + (raw_log or ""))
+            if match:
+                raw_path = match.group(1)
+                line_num = int(match.group(2))
+                norm_path = re.sub(r'^/(?:app|var/www|srv/app|code)/', '', raw_path)
+                file_info = {
+                    'file_path': norm_path,
+                    'line_number': line_num,
+                    'source': 'php_stack'
+                }
+
         if file_info:
-            # Determine file type
+            # Determine file type from extension (technology-agnostic)
             file_path = file_info['file_path']
-            if file_path.endswith('.dwl'):
-                file_info['file_type'] = 'dataweave'
-            elif file_path.endswith('.xml'):
-                file_info['file_type'] = 'mule_xml'
-            elif file_path.endswith('.yaml') or file_path.endswith('.yml'):
-                file_info['file_type'] = 'yaml'
-            elif file_path.endswith('.java'):
-                file_info['file_type'] = 'java'
-            else:
-                file_info['file_type'] = 'unknown'
+            ext_map = {
+                '.dwl':    'dataweave',
+                '.xml':    'mule_xml',
+                '.yaml':   'yaml',
+                '.yml':    'yaml',
+                '.java':   'java',
+                '.kt':     'kotlin',
+                '.scala':  'scala',
+                '.groovy': 'groovy',
+                '.py':     'python',
+                '.js':     'javascript',
+                '.ts':     'typescript',
+                '.mjs':    'javascript',
+                '.cjs':    'javascript',
+                '.cs':     'csharp',
+                '.go':     'go',
+                '.rb':     'ruby',
+                '.php':    'php',
+                '.rs':     'rust',
+            }
+            file_info['file_type'] = next(
+                (ft for ext, ft in ext_map.items() if file_path.endswith(ext)),
+                'unknown'
+            )
             
             logger.info(f"Extracted file info: {file_info}")
         else:

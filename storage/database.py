@@ -1,3 +1,19 @@
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                          P  R  I  S  M                               ║
+║       Autonomous AI Incident Management System                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  Building an Autonomous AI Incident Management System
+  with LangGraph and OpenTelemetry
+
+  Author   : Upadhyayula Avinash
+  GitHub   : https://github.com/u-avinash
+  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  Email    : uavinash.csit@gmail.com
+
+  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+"""
 """SQLAlchemy database setup and models."""
 from sqlalchemy import create_engine, Column, Integer, String, Text, Float, Boolean, DateTime, JSON
 from sqlalchemy.ext.declarative import declarative_base
@@ -120,6 +136,23 @@ class Incident(Base):
     # OTLP metadata
     incident_metadata = Column(JSON, nullable=True)
 
+    # Technology detection
+    source_technology = Column(String(50), nullable=True, index=True)   # java, python, nodejs, etc.
+    detected_framework = Column(String(100), nullable=True)              # spring, django, express, etc.
+
+    # Incident grouping (related errors grouped under a primary incident)
+    incident_group_id = Column(String(4), nullable=True, index=True)
+    is_primary_incident = Column(Boolean, default=True, nullable=True)
+
+    # SLA tracking
+    sla_acknowledged_at = Column(DateTime, nullable=True)
+    sla_resolution_due_at = Column(DateTime, nullable=True)
+    sla_status = Column(String(20), nullable=True)   # ON_TRACK, AT_RISK, BREACHED
+
+    # Structured rejection feedback
+    rejection_reason_code = Column(String(50), nullable=True)   # enum: wrong_root_cause, wrong_approach, etc.
+    fix_attempt_count = Column(Integer, default=0, nullable=True)
+
     # Git operations
     repo_path = Column(String(500), nullable=True)
     fix_branch = Column(String(255), nullable=True)
@@ -229,22 +262,50 @@ def init_database():
 
     # Run any necessary ALTER TABLE migrations for columns added after initial creation
     with engine.begin() as connection:
-        columns = [
+        # --- project_integration_configs migrations ---
+        pic_columns = [
             row[1]
             for row in connection.exec_driver_sql(
                 "PRAGMA table_info(project_integration_configs)"
             ).fetchall()
         ]
-        if "runtime" not in columns:
+        if "runtime" not in pic_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE project_integration_configs ADD COLUMN runtime JSON"
             )
             logger.info("Added runtime column to project_integration_configs")
 
-        if "repo_mappings" not in columns:
+        if "repo_mappings" not in pic_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE project_integration_configs ADD COLUMN repo_mappings JSON"
             )
             logger.info("Added repo_mappings column to project_integration_configs")
+
+        # --- incidents migrations ---
+        inc_columns = [
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(incidents)"
+            ).fetchall()
+        ]
+
+        new_incident_columns = [
+            ("source_technology",      "VARCHAR(50)"),
+            ("detected_framework",     "VARCHAR(100)"),
+            ("incident_group_id",      "VARCHAR(4)"),
+            ("is_primary_incident",    "BOOLEAN DEFAULT 1"),
+            ("sla_acknowledged_at",    "DATETIME"),
+            ("sla_resolution_due_at",  "DATETIME"),
+            ("sla_status",             "VARCHAR(20)"),
+            ("rejection_reason_code",  "VARCHAR(50)"),
+            ("fix_attempt_count",      "INTEGER DEFAULT 0"),
+        ]
+
+        for col_name, col_def in new_incident_columns:
+            if col_name not in inc_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE incidents ADD COLUMN {col_name} {col_def}"
+                )
+                logger.info("Added %s column to incidents", col_name)
 
     logger.info("Database initialized successfully")
