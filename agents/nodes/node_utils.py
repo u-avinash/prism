@@ -14,6 +14,8 @@
 
   Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
 """
+from __future__ import annotations
+
 """
 Shared utilities for workflow node implementations.
 
@@ -28,7 +30,6 @@ workflow node:
   2. ``safe_int(value)`` / ``safe_float(value)``
      — Null-safe numeric coercions used in quality score handling.
 """
-from __future__ import annotations
 
 import logging
 from datetime import datetime

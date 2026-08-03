@@ -14,17 +14,20 @@
 
   Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
 """
+from __future__ import annotations
+
 """
 Anypoint Platform API Client
 Provides integration with MuleSoft Anypoint Runtime Manager, API Manager,
 and Exchange APIs following MuleSoft best practices.
 """
-from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 import requests
+
+from integrations.verification import tls_verify_value
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,10 @@ class AnypointClient:
         self._access_token: Optional[str] = None
         self._token_expires_at: Optional[datetime] = None
         self.session = requests.Session()
+        # Apply the same configured corporate CA bundle or explicit
+        # administrator-approved TLS compatibility setting used by Team Admin
+        # verification and every other Prism integration.
+        self.session.verify = tls_verify_value()
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 

@@ -14,8 +14,9 @@
 
   Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
 """
-"""Simple JSON-file-backed customer store for Prism multi-tenant admin."""
 from __future__ import annotations
+
+"""Simple JSON-file-backed customer store for Prism multi-tenant admin."""
 
 import json
 import os

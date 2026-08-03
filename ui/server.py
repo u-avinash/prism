@@ -14,19 +14,23 @@
 
   Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
 """
-"""FastAPI dashboard server for Prism — Prism UI."""
 from __future__ import annotations
+
+"""FastAPI dashboard server for Prism — Prism UI."""
 
 import asyncio
 import difflib
+import hashlib
 import html as html_module
 import json
 import logging
 import mimetypes
 import os
 import re
+import secrets
 import statistics
 import sys
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +50,13 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from integrations.llm_provider import LLMProvider
+from integrations.verification import (
+    IntegrationVerificationError,
+    connection_error,
+    request as integration_request,
+    sanitized_response_text,
+    validate_https_url,
+)
 
 # ── Path bootstrap ──────────────────────────────────────────────────────────
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -841,6 +852,85 @@ def _get_project_integration_summary(project: Optional[dict]) -> list[dict]:
         )
 
     return [item for item in integrations if item["configured"]]
+
+
+_VERIFICATION_RECEIPT_TTL_SECONDS = 10 * 60
+_verification_receipts: dict[str, dict[str, Any]] = {}
+
+
+def _integration_config_fingerprint(
+    project_id: str,
+    integration_type: str,
+    payload: dict[str, Any],
+) -> str:
+    """Create a stable, secret-safe fingerprint of a tested configuration."""
+    secret_fields = {
+        "llm": "api_key",
+        "jira": "api_token",
+        "github": "token",
+        "anypoint": "client_secret",
+        "slack": "webhook_url",
+        "teams": "webhook_url",
+    }
+    normalized = {
+        key: str(value).strip() if value is not None else ""
+        for key, value in payload.items()
+        if key not in {"project_id", "verification_token"}
+    }
+
+    secret_field = secret_fields.get(integration_type)
+    if secret_field and not normalized.get(secret_field) and _AUTH_AVAILABLE and project_id:
+        stored_config = get_project_config(project_id) or {}
+        stored_secret = (stored_config.get(integration_type) or {}).get(secret_field)
+        if stored_secret:
+            normalized[secret_field] = str(stored_secret)
+
+    serialized = json.dumps(
+        {
+            "project_id": project_id,
+            "integration_type": integration_type,
+            "configuration": normalized,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _issue_verification_receipt(
+    request: Request,
+    project_id: str,
+    integration_type: str,
+    payload: dict[str, Any],
+) -> str:
+    token = secrets.token_urlsafe(32)
+    _verification_receipts[token] = {
+        "user_id": _get_user_id(_get_current_user(request)),
+        "project_id": project_id,
+        "integration_type": integration_type,
+        "fingerprint": _integration_config_fingerprint(project_id, integration_type, payload),
+        "expires_at": time.monotonic() + _VERIFICATION_RECEIPT_TTL_SECONDS,
+    }
+    return token
+
+
+def _verified_integration_response(
+    request: Request,
+    project_id: str,
+    integration_type: str,
+    payload: dict[str, Any],
+    message: str,
+) -> JSONResponse:
+    return JSONResponse(
+        {
+            "success": True,
+            "message": message,
+            "verification_token": _issue_verification_receipt(
+                request, project_id, integration_type, payload
+            ),
+        },
+        status_code=200,
+    )
 
 
 def _masked_secret_status(project_config: Optional[dict]) -> dict:
@@ -1894,8 +1984,38 @@ async def api_team_admin_save_integration(int_type: str, request: Request):
     if not project_id:
         return JSONResponse({"error": "No project found for this user"}, status_code=400)
 
+    if int_type not in {"llm", "jira", "github", "anypoint", "slack", "teams"}:
+        return JSONResponse({"error": f"Unsupported integration type: {int_type}"}, status_code=400)
+
+    verification_token = str(body.get("verification_token") or "")
+    receipt = _verification_receipts.pop(verification_token, None)
+    expected_fingerprint = _integration_config_fingerprint(project_id, int_type, body)
+    current_user_id = _get_user_id(_get_current_user(request))
+
+    if (
+        not receipt
+        or receipt.get("expires_at", 0) < time.monotonic()
+        or receipt.get("user_id") != current_user_id
+        or receipt.get("project_id") != project_id
+        or receipt.get("integration_type") != int_type
+        or receipt.get("fingerprint") != expected_fingerprint
+    ):
+        return JSONResponse(
+            {
+                "error": (
+                    "Verify this exact configuration successfully before saving. "
+                    "Verification results expire after 10 minutes and cannot be reused."
+                )
+            },
+            status_code=400,
+        )
+
     try:
-        config_data = {k: v for k, v in body.items() if k != "project_id"}
+        config_data = {
+            k: v
+            for k, v in body.items()
+            if k not in {"project_id", "verification_token"}
+        }
         update_project_config(project_id, int_type, config_data)
         return JSONResponse({"success": True, "type": int_type, "project_id": project_id})
     except Exception as exc:
@@ -2081,6 +2201,26 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
     except Exception:
         body = {}
 
+    # A masked secret is intentionally omitted by the browser. Reuse the
+    # project-scoped encrypted value so existing integrations can be tested
+    # without forcing an administrator to re-enter every credential.
+    project_id = (body.get("project_id") or "").strip()
+    if project_id and _AUTH_AVAILABLE:
+        stored_config = get_project_config(project_id) or {}
+        secret_fields = {
+            "llm": "api_key",
+            "jira": "api_token",
+            "github": "token",
+            "anypoint": "client_secret",
+            "slack": "webhook_url",
+            "teams": "webhook_url",
+        }
+        secret_field = secret_fields.get(int_type)
+        if secret_field and not (body.get(secret_field) or "").strip():
+            stored_secret = (stored_config.get(int_type) or {}).get(secret_field)
+            if stored_secret:
+                body[secret_field] = stored_secret
+
     _type_labels = {
         "llm": "LLM provider",
         "jira": "Jira",
@@ -2092,6 +2232,7 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
 
     if int_type == "llm":
         provider = (body.get("provider") or "").strip().lower()
+        custom_provider = (body.get("custom_provider") or "").strip()
         model = (body.get("model") or "").strip()
         api_key = (body.get("api_key") or "").strip()
         base_url = (body.get("base_url") or "").strip()
@@ -2102,7 +2243,10 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
             return JSONResponse({"success": False, "error": "LLM provider is required."}, status_code=400)
         if not model:
             return JSONResponse({"success": False, "error": "LLM model is required."}, status_code=400)
+        if provider == "custom" and not custom_provider:
+            return JSONResponse({"success": False, "error": "Custom provider name is required when provider is 'custom'."}, status_code=400)
 
+        # nvidia is a first-class provider — no custom_provider name required
         local_providers = {"ollama"}
         if provider not in local_providers and not api_key:
             return JSONResponse({"success": False, "error": "API key is required for the selected LLM provider."}, status_code=400)
@@ -2135,8 +2279,9 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                 base_url=base_url or None,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                custom_provider_name=custom_provider or None,
             )
-            ok, message = llm.test_connection_fast(timeout_seconds=10.0)
+            ok, message = llm.test_connection_fast(timeout_seconds=30.0)
             status = 200 if ok else 400
 
             if not ok:
@@ -2154,7 +2299,9 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                     status_code=status,
                 )
 
-            return JSONResponse({"success": True, "message": message, "error": None}, status_code=status)
+            return _verified_integration_response(
+                request, project_id, int_type, body, message
+            )
         except Exception as exc:
             error_message = str(exc)
             if api_key:
@@ -2180,18 +2327,22 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
             return JSONResponse({"success": False, "error": "Jira API token is required."}, status_code=400)
 
         try:
-            response = requests.get(
+            base_url = validate_https_url(base_url, integration="Jira")
+            response = integration_request(
+                "GET",
                 f"{base_url}/rest/api/2/myself",
                 auth=(username, api_token),
                 headers={"Accept": "application/json"},
-                timeout=10,
             )
             if response.status_code == 200:
                 user_data = response.json()
                 display_name = user_data.get("displayName") or user_data.get("name") or username
-                return JSONResponse(
-                    {"success": True, "message": f"Jira connection verified for {display_name}."},
-                    status_code=200,
+                return _verified_integration_response(
+                    request,
+                    project_id,
+                    int_type,
+                    body,
+                    f"Jira connection verified for {display_name}.",
                 )
             if response.status_code in (401, 403):
                 return JSONResponse(
@@ -2202,6 +2353,10 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                 {"success": False, "error": f"Jira verification failed with status {response.status_code}."},
                 status_code=400,
             )
+        except requests.SSLError as exc:
+            return JSONResponse({"success": False, "error": str(connection_error("Jira", exc))}, status_code=400)
+        except IntegrationVerificationError as exc:
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
         except requests.RequestException as exc:
             return JSONResponse({"success": False, "error": f"Unable to reach Jira: {exc}"}, status_code=400)
 
@@ -2219,22 +2374,22 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
         }
 
         try:
-            user_response = requests.get("https://api.github.com/user", headers=headers, timeout=10)
+            user_response = integration_request("GET", "https://api.github.com/user", headers=headers)
             if user_response.status_code == 200:
                 user_data = user_response.json()
                 login = user_data.get("login") or "GitHub user"
 
                 if org:
-                    org_response = requests.get(
+                    org_response = integration_request(
+                        "GET",
                         f"https://api.github.com/orgs/{org}",
                         headers=headers,
-                        timeout=10,
                     )
                     if org_response.status_code == 404:
-                        owner_response = requests.get(
+                        owner_response = integration_request(
+                            "GET",
                             f"https://api.github.com/users/{org}",
                             headers=headers,
-                            timeout=10,
                         )
                         if owner_response.status_code != 200:
                             return JSONResponse(
@@ -2250,7 +2405,9 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                 message = f"GitHub connection verified for {login}."
                 if org:
                     message += f" Owner/organization '{org}' is reachable."
-                return JSONResponse({"success": True, "message": message}, status_code=200)
+                return _verified_integration_response(
+                    request, project_id, int_type, body, message
+                )
 
             if user_response.status_code in (401, 403):
                 return JSONResponse(
@@ -2262,6 +2419,8 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                 {"success": False, "error": f"GitHub verification failed with status {user_response.status_code}."},
                 status_code=400,
             )
+        except requests.SSLError as exc:
+            return JSONResponse({"success": False, "error": str(connection_error("GitHub", exc))}, status_code=400)
         except requests.RequestException as exc:
             return JSONResponse({"success": False, "error": f"Unable to reach GitHub: {exc}"}, status_code=400)
 
@@ -2272,24 +2431,36 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
             return JSONResponse({"success": False, "error": "Slack webhook URL is required."}, status_code=400)
 
         try:
-            response = requests.post(
+            webhook_url = validate_https_url(
+                webhook_url,
+                integration="Slack webhook",
+                allowed_hosts=("hooks.slack.com",),
+            )
+            response = integration_request(
+                "POST",
                 webhook_url,
                 json={"text": "Prism integration verification"},
                 headers={"Content-Type": "application/json"},
-                timeout=10,
             )
             if response.status_code == 200 and response.text.strip().lower() == "ok":
-                return JSONResponse(
-                    {"success": True, "message": "Slack webhook verified successfully."},
-                    status_code=200,
+                return _verified_integration_response(
+                    request,
+                    project_id,
+                    int_type,
+                    body,
+                    "Slack webhook verified successfully.",
                 )
             return JSONResponse(
                 {
                     "success": False,
-                    "error": f"Slack verification failed with status {response.status_code}: {response.text.strip() or 'Unknown response'}",
+                    "error": f"Slack verification failed with status {response.status_code}: {sanitized_response_text(response)}",
                 },
                 status_code=400,
             )
+        except requests.SSLError as exc:
+            return JSONResponse({"success": False, "error": str(connection_error("Slack", exc))}, status_code=400)
+        except IntegrationVerificationError as exc:
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
         except requests.RequestException as exc:
             return JSONResponse({"success": False, "error": f"Unable to reach Slack: {exc}"}, status_code=400)
 
@@ -2300,24 +2471,36 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
             return JSONResponse({"success": False, "error": "Microsoft Teams webhook URL is required."}, status_code=400)
 
         try:
-            response = requests.post(
+            webhook_url = validate_https_url(
+                webhook_url,
+                integration="Microsoft Teams webhook",
+                allowed_hosts=("office.com", "office365.com", "teams.microsoft.com"),
+            )
+            response = integration_request(
+                "POST",
                 webhook_url,
                 json={"text": "Prism integration verification"},
                 headers={"Content-Type": "application/json"},
-                timeout=10,
             )
             if 200 <= response.status_code < 300:
-                return JSONResponse(
-                    {"success": True, "message": "Microsoft Teams webhook verified successfully."},
-                    status_code=200,
+                return _verified_integration_response(
+                    request,
+                    project_id,
+                    int_type,
+                    body,
+                    "Microsoft Teams webhook verified successfully.",
                 )
             return JSONResponse(
                 {
                     "success": False,
-                    "error": f"Microsoft Teams verification failed with status {response.status_code}: {response.text.strip() or 'Unknown response'}",
+                    "error": f"Microsoft Teams verification failed with status {response.status_code}: {sanitized_response_text(response)}",
                 },
                 status_code=400,
             )
+        except requests.SSLError as exc:
+            return JSONResponse({"success": False, "error": str(connection_error("Microsoft Teams", exc))}, status_code=400)
+        except IntegrationVerificationError as exc:
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
         except requests.RequestException as exc:
             return JSONResponse({"success": False, "error": f"Unable to reach Microsoft Teams: {exc}"}, status_code=400)
 
@@ -2342,7 +2525,8 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
 
         for token_url in token_urls:
             try:
-                token_response = requests.post(
+                token_response = integration_request(
+                    "POST",
                     token_url,
                     data={
                         "grant_type": "client_credentials",
@@ -2353,7 +2537,6 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                         "Accept": "application/json",
                         "Content-Type": "application/x-www-form-urlencoded",
                     },
-                    timeout=10,
                 )
                 if token_response.status_code in (200, 201):
                     break
@@ -2361,17 +2544,21 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                 last_exception = exc
 
         if token_response is None:
+            if isinstance(last_exception, requests.SSLError):
+                return JSONResponse(
+                    {"success": False, "error": str(connection_error("Anypoint Platform", last_exception))},
+                    status_code=400,
+                )
             return JSONResponse(
-                {"success": False, "error": f"Unable to reach Anypoint Platform: {last_exception}"},
+                {"success": False, "error": "Unable to reach Anypoint Platform. Check network access and proxy configuration."},
                 status_code=400,
             )
 
         if token_response.status_code in (401, 403):
-            detail = token_response.text.strip()
             return JSONResponse(
                 {
                     "success": False,
-                    "error": f"Anypoint authentication failed. Check client ID and client secret.{(' Response: ' + detail) if detail else ''}",
+                    "error": "Anypoint authentication failed. Check the client ID and client secret.",
                 },
                 status_code=400,
             )
@@ -2380,7 +2567,7 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
             return JSONResponse(
                 {
                     "success": False,
-                    "error": f"Anypoint token request failed with status {token_response.status_code}: {token_response.text.strip() or 'Unknown response'}",
+                    "error": f"Anypoint token request failed with status {token_response.status_code}: {sanitized_response_text(token_response)}",
                 },
                 status_code=400,
             )
@@ -2391,7 +2578,7 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
             return JSONResponse(
                 {
                     "success": False,
-                    "error": f"Anypoint returned a non-JSON token response: {token_response.text.strip() or 'Empty response'}",
+                    "error": f"Anypoint returned a non-JSON token response: {sanitized_response_text(token_response)}",
                 },
                 status_code=400,
             )
@@ -2402,16 +2589,24 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
 
         if org_id:
             try:
-                org_response = requests.get(
+                org_response = integration_request(
+                    "GET",
                     f"https://anypoint.mulesoft.com/accounts/api/organizations/{org_id}",
                     headers={
                         "Authorization": f"Bearer {access_token}",
                         "Accept": "application/json",
                     },
-                    timeout=10,
                 )
-            except requests.RequestException as exc:
-                return JSONResponse({"success": False, "error": f"Unable to validate Anypoint organization: {exc}"}, status_code=400)
+            except requests.SSLError as exc:
+                return JSONResponse(
+                    {"success": False, "error": str(connection_error("Anypoint Platform", exc))},
+                    status_code=400,
+                )
+            except requests.RequestException:
+                return JSONResponse(
+                    {"success": False, "error": "Unable to validate the Anypoint organization. Check network access and organization ID."},
+                    status_code=400,
+                )
 
             if org_response.status_code == 404:
                 return JSONResponse(
@@ -2422,7 +2617,7 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                 return JSONResponse(
                     {
                         "success": False,
-                        "error": f"Anypoint organization validation failed with status {org_response.status_code}: {org_response.text.strip() or 'Unknown response'}",
+                        "error": f"Anypoint organization validation failed with status {org_response.status_code}: {sanitized_response_text(org_response)}",
                     },
                     status_code=400,
                 )
@@ -2430,7 +2625,9 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
         message = "Anypoint Platform connection verified successfully."
         if org_id:
             message += f" Organization '{org_id}' is reachable."
-        return JSONResponse({"success": True, "message": message}, status_code=200)
+        return _verified_integration_response(
+            request, project_id, int_type, body, message
+        )
 
     label = _type_labels.get(int_type, int_type.upper())
     return JSONResponse({"success": True, "message": f"{label} connection test succeeded (stub)."})

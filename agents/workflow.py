@@ -163,6 +163,7 @@ def _resolve_project_id_for_incident(
 
         configured_fallback: Optional[str] = None
         matched_projects: list[tuple[dict, bool]] = []
+        org_configured_projects: list[tuple[dict, bool]] = []
 
         env_aliases = {
             "prod": {"prod", "production"},
@@ -212,6 +213,23 @@ def _resolve_project_id_for_incident(
                 except Exception:
                     project_config = {}
 
+            github_config = project_config.get("github") or {}
+            github_org = (
+                project.get("github_org")
+                or (github_config.get("org") if isinstance(github_config, dict) else "")
+                or ""
+            ).strip()
+            env_matches = (
+                not normalized_env
+                or not project_env
+                or normalized_env in env_aliases.get(project_env, {project_env})
+            )
+            if github_org:
+                # Source Code Configuration is organization-wide: any repository
+                # accessible to this organization may produce an incident. Only
+                # use this route when it identifies one project unambiguously.
+                org_configured_projects.append((project, env_matches))
+
             repo_mappings = project_config.get("repo_mappings") or {}
             if isinstance(repo_mappings, dict):
                 for mapped_app, mapping_val in repo_mappings.items():
@@ -243,11 +261,6 @@ def _resolve_project_id_for_incident(
             if not name_matches:
                 continue
 
-            env_matches = (
-                not normalized_env
-                or not project_env
-                or normalized_env in env_aliases.get(project_env, {project_env})
-            )
             matched_projects.append((project, env_matches))
 
         if matched_projects:
@@ -261,6 +274,33 @@ def _resolve_project_id_for_incident(
             # Environment values are dynamic telemetry attributes and should not
             # block routing once the application mapping is known.
             return matched_projects[0][0].get("id")
+
+        # No explicit application alias was found. A project configured with a
+        # GitHub organization owns all repositories accessible to that
+        # organization, so it can route arbitrary repository application names.
+        # Avoid guessing in multi-project deployments: organization-wide routing
+        # is allowed only when exactly one project qualifies after environment
+        # preference is applied.
+        preferred_org_projects = [
+            project for project, env_matches in org_configured_projects if env_matches
+        ]
+        org_candidates = preferred_org_projects or [
+            project for project, _ in org_configured_projects
+        ]
+        if len(org_candidates) == 1:
+            resolved_id = org_candidates[0].get("id")
+            logger.info(
+                "Resolved project_id=%s for app_name='%s' through configured GitHub organization.",
+                resolved_id,
+                app_name,
+            )
+            return resolved_id
+        if len(org_candidates) > 1:
+            logger.warning(
+                "Multiple projects have GitHub organizations configured for app_name='%s'; "
+                "add an explicit application alias to select one project.",
+                app_name,
+            )
 
         if configured_fallback:
             logger.warning(

@@ -22,6 +22,7 @@ are stored encrypted in the database and managed through the Team Admin
 onboarding / project configuration pages.
 """
 from functools import lru_cache
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -47,6 +48,16 @@ class Settings(BaseSettings):
     # encrypt/decrypt all other credentials stored in the database.
     integration_secret_key: Optional[str] = None
     integration_secret_key_file: str = "./data/.integration.key"
+
+    # ── Outbound HTTP / TLS ──────────────────────────────────────────────────
+    # Path to a PEM bundle containing corporate/private root CA certificates.
+    # When unset, Python's standard verified CA store is used.
+    trusted_ca_bundle: Optional[str] = None
+    # Emergency compatibility switch for corporate TLS interception appliances
+    # that present certificates which cannot be validated by any CA bundle.
+    # Disabled by default: enable only via ALLOW_UNVERIFIED_TLS=true
+    # (PRISM_ALLOW_UNVERIFIED_TLS is supported as an environment alias).
+    allow_unverified_tls: bool = False
 
     # ── OpenTelemetry & Ingestion ─────────────────────────────────────────────
     otlp_collector_port: int = 4318
@@ -107,6 +118,19 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     """Get cached settings instance."""
+    # Backward-compatible aliases used in deployment documentation. The native
+    # Pydantic names remain supported as well.
+    if (
+        "PRISM_ALLOW_UNVERIFIED_TLS" in os.environ
+        and "ALLOW_UNVERIFIED_TLS" not in os.environ
+    ):
+        os.environ["ALLOW_UNVERIFIED_TLS"] = os.environ["PRISM_ALLOW_UNVERIFIED_TLS"]
+    if (
+        "PRISM_TRUSTED_CA_BUNDLE" in os.environ
+        and "TRUSTED_CA_BUNDLE" not in os.environ
+    ):
+        os.environ["TRUSTED_CA_BUNDLE"] = os.environ["PRISM_TRUSTED_CA_BUNDLE"]
+
     settings = Settings()
     settings.ensure_directories()
     return settings

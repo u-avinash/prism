@@ -14,6 +14,8 @@
 
   Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
 """
+from __future__ import annotations
+
 """
 auth_store.py — JSON-file based store for users, projects, teams, and role-based access.
 
@@ -24,7 +26,6 @@ Roles:
 
 Default admin credentials:  username=admin  password=ChangeMe123!
 """
-from __future__ import annotations
 
 import hashlib
 import json

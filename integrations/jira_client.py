@@ -21,10 +21,10 @@ import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
-import requests
 from atlassian import Jira
 from atlassian.errors import ApiError
 
+from integrations.verification import request as integration_request
 from utils.retry_handler import retry_with_backoff
 
 logger = logging.getLogger(__name__)
@@ -456,7 +456,8 @@ class JiraClient:
                 ],
             }
 
-            resp = requests.post(
+            resp = integration_request(
+                "POST",
                 f"{self.url}/rest/devinfo/0.10/bulk",
                 json=payload,
                 headers=self._basic_auth_headers(),

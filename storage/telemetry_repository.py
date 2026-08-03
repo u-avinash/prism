@@ -14,8 +14,9 @@
 
   Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
 """
-"""Repository helpers for telemetry log storage and querying."""
 from __future__ import annotations
+
+"""Repository helpers for telemetry log storage and querying."""
 
 import json
 import logging

@@ -295,9 +295,9 @@
           <div class="form-row">
             <div class="form-group">
               <label class="form-label" for="llmProvider">Provider</label>
-              <select class="form-input form-select" id="llmProvider" onchange="toggleCustomProvider(); updateModelOptions();">
+              <select class="form-input form-select" id="llmProvider" onchange="handleLlmProviderChange();">
                 {% set llm_provider = integration_config.get('llm', {}).get('provider', '') %}
-                {% for provider in ['openai', 'azure_openai', 'anthropic', 'google_gemini', 'mistral', 'cohere', 'groq', 'perplexity', 'together_ai', 'deepseek', 'ollama', 'bedrock', 'hugging_face', 'custom'] %}
+                {% for provider in ['openai', 'azure_openai', 'anthropic', 'google_gemini', 'groq', 'mistral', 'cohere', 'nvidia', 'xai', 'deepseek', 'perplexity', 'together_ai', 'openrouter', 'cerebras', 'fireworks_ai', 'sambanova', 'ollama', 'bedrock', 'hugging_face', 'custom'] %}
                 <option value="{{ provider }}" {% if llm_provider == provider %}selected{% endif %}>{{ provider | replace('_', ' ') | title }}</option>
                 {% endfor %}
               </select>
@@ -610,6 +610,17 @@ var verificationState = {
   teams: false
 };
 
+// Issued by the server only after it verifies the exact configuration.
+// This is intentionally kept in memory and is cleared on every input change.
+var verificationReceipt = {
+  llm: '',
+  jira: '',
+  github: '',
+  anypoint: '',
+  slack: '',
+  teams: ''
+};
+
 var integrationEditState = {
   llm: "{{ 'false' if integration_config.get('llm') else 'true' }}" === 'true',
   jira: "{{ 'false' if integration_config.get('jira') else 'true' }}" === 'true',
@@ -653,57 +664,95 @@ function toggleMemberMode() {
 }
 
 var llmModelCatalog = {
+  // ── OpenAI ────────────────────────────────────────────────────────────
   openai: [
-    'gpt-5.5',
-    'gpt-5.4',
-    'gpt-5.4-mini',
-    'gpt-5.4-nano',
-    'o4',
-    'o4-mini',
-    'o3',
+    'gpt-5',
+    'gpt-5-mini',
+    'gpt-5-nano',
     'gpt-4.1',
     'gpt-4.1-mini',
-    'gpt-4o',
-    'gpt-4o-mini'
-  ],
-  azure_openai: [
-    'gpt-5.5',
-    'gpt-5.4',
-    'gpt-5.4-mini',
-    'gpt-5.4-nano',
-    'gpt-4.1',
-    'gpt-4.1-mini',
+    'gpt-4.1-nano',
     'gpt-4o',
     'gpt-4o-mini',
-    'o4',
+    'o3',
+    'o3-mini',
+    'o4-mini'
+  ],
+  // ── Azure OpenAI ──────────────────────────────────────────────────────
+  azure_openai: [
+    'gpt-4o',
+    'gpt-4o-mini',
+    'gpt-4.1',
+    'gpt-4.1-mini',
+    'gpt-4-turbo',
+    'gpt-4',
+    'o3',
+    'o3-mini',
     'o4-mini',
-    'o3'
+    'o1',
+    'o1-mini',
+    'gpt-35-turbo'
   ],
+  // ── Anthropic ────────────────────────────────────────────────────────
   anthropic: [
-    'claude-opus-4',
-    'claude-sonnet-4',
-    'claude-3-7-sonnet',
-    'claude-3-5-sonnet',
-    'claude-3-5-haiku',
-    'claude-3-opus',
-    'claude-3-sonnet',
-    'claude-3-haiku'
+    'claude-opus-4-5',
+    'claude-opus-4-0',
+    'claude-sonnet-4-5',
+    'claude-sonnet-4-0',
+    'claude-3-7-sonnet-20250219',
+    'claude-3-5-sonnet-20241022',
+    'claude-3-5-haiku-20241022',
+    'claude-3-opus-20240229',
+    'claude-3-sonnet-20240229',
+    'claude-3-haiku-20240307'
   ],
+  // ── Google Gemini ────────────────────────────────────────────────────
   google_gemini: [
     'gemini-2.5-pro',
     'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
     'gemini-2.0-flash',
     'gemini-2.0-flash-lite',
+    'gemini-2.0-flash-thinking-exp',
     'gemini-1.5-pro',
     'gemini-1.5-flash',
     'gemini-1.5-flash-8b',
-    'gemma-2-27b-it'
+    'gemma-3-27b-it',
+    'gemma-3-12b-it',
+    'gemma-3-4b-it',
+    'gemma-2-27b-it',
+    'gemma-2-9b-it'
   ],
+  // ── Groq ─────────────────────────────────────────────────────────────
+  groq: [
+    'llama-3.3-70b-versatile',
+    'llama-3.3-70b-specdec',
+    'llama-3.1-8b-instant',
+    'llama3-70b-8192',
+    'llama3-8b-8192',
+    'llama3-groq-70b-8192-tool-use-preview',
+    'llama3-groq-8b-8192-tool-use-preview',
+    'deepseek-r1-distill-llama-70b',
+    'gemma2-9b-it',
+    'gemma-7b-it',
+    'mixtral-8x7b-32768',
+    'qwen/qwq-32b',
+    'qwen/qwen-2.5-72b-instruct',
+    'qwen/qwen-2.5-coder-32b-instruct',
+    'compound-beta',
+    'compound-beta-mini',
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b'
+  ],
+  // ── Mistral ──────────────────────────────────────────────────────────
   mistral: [
     'mistral-large-latest',
-    'pixtral-large-latest',
     'mistral-medium-latest',
     'mistral-small-latest',
+    'pixtral-large-latest',
+    'magistral-medium-latest',
+    'magistral-small-latest',
+    'devstral-medium-latest',
     'ministral-8b-latest',
     'ministral-3b-latest',
     'codestral-latest',
@@ -712,89 +761,237 @@ var llmModelCatalog = {
     'open-mixtral-8x7b',
     'open-mistral-7b'
   ],
+  // ── Cohere ───────────────────────────────────────────────────────────
   cohere: [
+    'command-a-03-2025',
     'command-r-plus-08-2024',
+    'command-r-plus',
     'command-r-08-2024',
+    'command-r',
     'command-r7b-12-2024',
     'command-light',
-    'embed-v4.0',
-    'embed-english-v3.0',
-    'embed-multilingual-v3.0'
+    'c4ai-aya-expanse-32b',
+    'c4ai-aya-expanse-8b'
   ],
-  groq: [
-    'openai/gpt-oss-120b',
-    'openai/gpt-oss-20b',
-    'llama-3.3-70b-versatile',
-    'llama-3.1-8b-instant',
-    'gemma2-9b-it',
-    'mixtral-8x7b-32768',
-    'llama3-70b-8192',
-    'llama3-8b-8192'
+  // ── NVIDIA NIM ───────────────────────────────────────────────────────
+  nvidia: [
+    'nvidia/llama-3.1-nemotron-ultra-253b-v1',
+    'nvidia/llama-3.3-nemotron-super-49b-v1',
+    'nvidia/llama-3.1-nemotron-70b-instruct',
+    'meta/llama-3.3-70b-instruct',
+    'meta/llama-3.1-405b-instruct',
+    'meta/llama-3.1-70b-instruct',
+    'meta/llama-3.1-8b-instruct',
+    'deepseek-ai/deepseek-r1-0528',
+    'deepseek-ai/deepseek-r1',
+    'deepseek-ai/deepseek-v3-0324',
+    'z-ai/glm-5.2',
+    'qwen/qwq-32b',
+    'qwen/qwen2.5-72b-instruct',
+    'microsoft/phi-4-reasoning-plus',
+    'microsoft/phi-4',
+    'mistralai/mistral-large-2-instruct',
+    'mistralai/mixtral-8x22b-instruct-v0.1',
+    'google/gemma-3-27b-it',
+    'google/gemma-3-12b-it',
+    'nv-mistralai/mistral-nemo-12b-instruct',
+    'ibm/granite-3.3-8b-instruct',
+    'ibm/granite-3.3-2b-instruct'
   ],
+  // ── xAI / Grok ───────────────────────────────────────────────────────
+  xai: [
+    'grok-3',
+    'grok-3-fast',
+    'grok-3-mini',
+    'grok-3-mini-fast',
+    'grok-2-1212',
+    'grok-2-vision-1212',
+    'grok-beta',
+    'grok-vision-beta'
+  ],
+  // ── DeepSeek ─────────────────────────────────────────────────────────
+  deepseek: [
+    'deepseek-r1-0528',
+    'deepseek-r1',
+    'deepseek-v3-0324',
+    'deepseek-v3',
+    'deepseek-reasoner',
+    'deepseek-chat',
+    'deepseek-coder'
+  ],
+  // ── Perplexity ───────────────────────────────────────────────────────
   perplexity: [
     'sonar-pro',
     'sonar-deep-research',
     'sonar-reasoning-pro',
     'sonar-reasoning',
     'sonar',
-    'r1-1776'
+    'r1-1776',
+    'sonar-turbo'
   ],
+  // ── Together AI ──────────────────────────────────────────────────────
   together_ai: [
     'deepseek-ai/DeepSeek-R1',
+    'deepseek-ai/DeepSeek-R1-Distill-Llama-70B',
     'deepseek-ai/DeepSeek-V3',
+    'meta-llama/Meta-Llama-3.3-70B-Instruct-Turbo',
     'meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo',
     'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
     'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',
+    'Qwen/QwQ-32B',
     'Qwen/Qwen2.5-72B-Instruct-Turbo',
     'Qwen/Qwen2.5-7B-Instruct-Turbo',
-    'mistralai/Mixtral-8x7B-Instruct-v0.1'
+    'mistralai/Mixtral-8x22B-Instruct-v0.1',
+    'mistralai/Mixtral-8x7B-Instruct-v0.1',
+    'mistralai/Mistral-7B-Instruct-v0.3',
+    'google/gemma-2-27b-it',
+    'microsoft/WizardLM-2-8x22B',
+    'NovaSky-AI/Sky-T1-32B-Preview'
   ],
-  deepseek: [
-    'deepseek-r1',
-    'deepseek-v3',
-    'deepseek-reasoner',
-    'deepseek-chat'
+  // ── OpenRouter ───────────────────────────────────────────────────────
+  openrouter: [
+    'openai/gpt-5',
+    'openai/gpt-4.1',
+    'anthropic/claude-sonnet-4',
+    'google/gemini-2.5-pro',
+    'deepseek/deepseek-r1',
+    'meta-llama/llama-4-maverick',
+    'qwen/qwen3-235b-a22b'
   ],
+  // ── Cerebras ─────────────────────────────────────────────────────────
+  cerebras: [
+    'llama-4-scout-17b-16e-instruct',
+    'llama-3.3-70b',
+    'qwen-3-32b'
+  ],
+  // ── Fireworks AI ─────────────────────────────────────────────────────
+  fireworks_ai: [
+    'accounts/fireworks/models/llama4-maverick-instruct-basic',
+    'accounts/fireworks/models/llama4-scout-instruct-basic',
+    'accounts/fireworks/models/deepseek-r1',
+    'accounts/fireworks/models/qwen3-235b-a22b'
+  ],
+  // ── SambaNova ────────────────────────────────────────────────────────
+  sambanova: [
+    'Meta-Llama-3.3-70B-Instruct',
+    'Meta-Llama-3.1-405B-Instruct',
+    'DeepSeek-R1',
+    'Qwen3-32B'
+  ],
+  // ── Ollama (local) ───────────────────────────────────────────────────
   ollama: [
     'llama3.3',
     'llama3.2',
+    'llama3.2:1b',
     'llama3.1',
+    'llama3.1:70b',
+    'qwen3',
+    'qwen3:32b',
     'qwen2.5',
+    'qwen2.5:72b',
     'qwen2.5-coder',
+    'qwen2.5-coder:32b',
+    'deepseek-r1',
+    'deepseek-r1:70b',
+    'deepseek-v3',
     'phi4',
+    'phi4-mini',
+    'phi4-reasoning',
+    'gemma3',
+    'gemma3:27b',
+    'gemma2',
     'mistral',
     'mistral-large',
-    'deepseek-r1'
+    'mixtral',
+    'codellama',
+    'starcoder2',
+    'nomic-embed-text'
   ],
+  // ── AWS Bedrock ──────────────────────────────────────────────────────
   bedrock: [
     'anthropic.claude-opus-4-20250514-v1:0',
     'anthropic.claude-sonnet-4-20250514-v1:0',
     'anthropic.claude-3-7-sonnet-20250219-v1:0',
+    'anthropic.claude-3-5-sonnet-20241022-v2:0',
     'anthropic.claude-3-5-haiku-20241022-v1:0',
+    'anthropic.claude-3-opus-20240229-v1:0',
     'amazon.nova-pro-v1:0',
     'amazon.nova-lite-v1:0',
     'amazon.nova-micro-v1:0',
+    'amazon.titan-text-premier-v1:0',
+    'meta.llama3-3-70b-instruct-v1:0',
+    'meta.llama3-2-90b-instruct-v1:0',
+    'meta.llama3-2-11b-instruct-v1:0',
+    'meta.llama3-1-405b-instruct-v1:0',
     'meta.llama3-1-70b-instruct-v1:0',
     'meta.llama3-1-8b-instruct-v1:0',
-    'mistral.mistral-large-2407-v1:0'
+    'mistral.mistral-large-2407-v1:0',
+    'mistral.mixtral-8x7b-instruct-v0:1',
+    'cohere.command-r-plus-v1:0',
+    'cohere.command-r-v1:0',
+    'ai21.jamba-1-5-large-v1:0',
+    'ai21.jamba-1-5-mini-v1:0'
   ],
+  // ── Hugging Face Inference API ───────────────────────────────────────
   hugging_face: [
-    'meta-llama/Llama-3.1-405B-Instruct',
-    'meta-llama/Llama-3.1-70B-Instruct',
-    'meta-llama/Llama-3.1-8B-Instruct',
+    'meta-llama/Meta-Llama-3.3-70B-Instruct',
+    'meta-llama/Meta-Llama-3.1-405B-Instruct',
+    'meta-llama/Meta-Llama-3.1-70B-Instruct',
+    'meta-llama/Meta-Llama-3.1-8B-Instruct',
+    'Qwen/QwQ-32B-Preview',
     'Qwen/Qwen2.5-72B-Instruct',
     'Qwen/Qwen2.5-32B-Instruct',
+    'Qwen/Qwen2.5-Coder-32B-Instruct',
+    'microsoft/Phi-4',
+    'microsoft/phi-4-mini-reasoning',
+    'deepseek-ai/DeepSeek-R1-Distill-Llama-70B',
     'mistralai/Mixtral-8x22B-Instruct-v0.1',
     'mistralai/Mistral-7B-Instruct-v0.3',
+    'google/gemma-3-27b-it',
+    'google/gemma-3-12b-it',
     'google/gemma-2-27b-it',
-    'google/gemma-2-9b-it'
+    'google/gemma-2-9b-it',
+    'tiiuae/falcon-180B-chat',
+    'bigcode/starcoder2-33b'
   ],
+  // ── Custom (enter model name manually) ───────────────────────────────
   custom: []
 };
 
 function toggleCustomProvider() {
   var isCustom = document.getElementById('llmProvider').value === 'custom';
   document.getElementById('llmCustomProviderGroup').style.display = isCustom ? '' : 'none';
+}
+
+function handleLlmProviderChange() {
+  var baseUrlInput = document.getElementById('llmBaseUrl');
+  var currentHost = '';
+
+  try {
+    currentHost = new URL(baseUrlInput.value.trim()).hostname.toLowerCase();
+  } catch (_) {
+    // Leave an empty, custom, or incomplete user-entered URL unchanged.
+  }
+
+  // These endpoints belong to one specific provider. Retaining one after a
+  // provider switch causes misleading 404 errors (for example, GPT models
+  // sent to NVIDIA NIM), so clear it and use the selected provider's default.
+  var endpointOwners = {
+    'api.openai.com': 'openai',
+    'integrate.api.nvidia.com': 'nvidia',
+    'openrouter.ai': 'openrouter',
+    'api.cerebras.ai': 'cerebras',
+    'api.fireworks.ai': 'fireworks_ai',
+    'api.sambanova.ai': 'sambanova'
+  };
+  var selectedProvider = document.getElementById('llmProvider').value;
+  if (endpointOwners[currentHost] && endpointOwners[currentHost] !== selectedProvider) {
+    baseUrlInput.value = '';
+  }
+
+  toggleCustomProvider();
+  updateModelOptions();
+  invalidateVerification('llm');
 }
 
 function updateModelOptions() {
@@ -993,9 +1190,9 @@ function setIntegrationButtons(type, verified) {
     verifyBtn.classList.toggle('btn-ghost', !verified);
   }
 
-  // Save is always enabled in edit mode — verification is recommended but not mandatory
+  // A changed configuration must be verified before it can be persisted.
   if (saveBtn) {
-    saveBtn.disabled = false;
+    saveBtn.disabled = !verified;
   }
 }
 
@@ -1010,6 +1207,7 @@ function setVerifyState(type, ok, message) {
 }
 
 function invalidateVerification(type) {
+  verificationReceipt[type] = '';
   if (!verificationState[type]) return;
   setVerifyState(type, false, 'Not verified');
 }
@@ -1037,8 +1235,7 @@ function setIntegrationEditMode(type, editable) {
     setVerifyState(type, true, 'Saved configuration');
   } else {
     verificationState[type] = false;
-    setVerifyState(type, false, 'Editing — verification optional');
-    if (saveBtn) saveBtn.disabled = false;
+    setVerifyState(type, false, 'Editing — verify before saving');
   }
 
   toggleCustomProvider();
@@ -1175,12 +1372,25 @@ async function testIntegration(type) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(getIntegrationPayload(type))
     });
-    const d = await r.json();
-    if (r.ok) {
+    const responseText = await r.text();
+    var d = {};
+    try {
+      d = responseText ? JSON.parse(responseText) : {};
+    } catch (_) {
+      d = {
+        error: 'Verification request failed with HTTP ' + r.status +
+          '. The server returned a non-JSON response: ' +
+          responseText.slice(0, 160)
+      };
+    }
+
+    if (r.ok && d.success && d.verification_token) {
+      verificationReceipt[type] = d.verification_token;
       setVerifyState(type, true, d.message || 'Verified successfully');
       alert(d.message || 'Verification successful');
     } else {
-      setVerifyState(type, false, d.error || 'Verification failed');
+      verificationReceipt[type] = '';
+      setVerifyState(type, false, d.error || 'Verification did not produce a save receipt.');
       alert(d.error || 'Verification failed');
     }
   } catch (e) {
@@ -1215,22 +1425,27 @@ async function deleteIntegration(type) {
 
 async function saveIntegration(type) {
   if (!validateIntegrationFields(type)) return;
-  if (!verificationState[type]) {
-    var proceed = confirm('This configuration has not been verified yet. Save anyway?');
-    if (!proceed) return;
+  if (!verificationState[type] || !verificationReceipt[type]) {
+    alert('Verify this exact configuration successfully before saving it.');
+    return;
   }
 
   try {
+    var payload = getIntegrationPayload(type);
+    payload.verification_token = verificationReceipt[type];
     const r = await fetch('/api/team-admin/integration/' + type, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(getIntegrationPayload(type))
+      body: JSON.stringify(payload)
     });
     const d = await r.json();
     if (r.ok) {
+      verificationReceipt[type] = '';
       setIntegrationEditMode(type, false);
       alert(type.toUpperCase() + ' configuration saved.');
     } else {
+      verificationReceipt[type] = '';
+      setVerifyState(type, false, d.error || 'Verification required before saving');
       alert(d.error || 'Error saving configuration');
     }
   } catch (e) {
@@ -1308,7 +1523,7 @@ function switchProjectContext(projectId) {
 }
 
 // ── Repo Mappings ─────────────────────────────────────────────────────────
-var _repoMappings = {{ (integration_config.get('repo_mappings') or {})|tojson }};
+var _repoMappings = {};
 
 function renderRepoMappingRows() {
   var container = document.getElementById('repoMappingRows');
@@ -1357,29 +1572,10 @@ function addRepoMappingRow() {
   document.getElementById('repoMappingRows').appendChild(_buildRepoMappingRow('', '', 'main', ''));
 }
 
-async function saveSourceCodeConfig() {
-  var projectId = getSelectedProjectId();
-  if (!projectId) { alert('Please select a project first.'); return; }
-  var org = (document.getElementById('srcOrg').value || '').trim();
-  var branch = (document.getElementById('srcBranch').value || '').trim() || 'main';
-  if (!org) { alert('GitHub Organisation / Owner is required.'); return; }
+function saveSourceCodeConfig() {
   var statusEl = document.getElementById('sourceCodeConfigStatus');
-  statusEl.textContent = 'Saving...';
-  try {
-    const r = await fetch('/api/team-admin/integration/github', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_id: projectId, org: org, default_branch: branch })
-    });
-    const d = await r.json();
-    if (r.ok && d.success) {
-      statusEl.textContent = 'Saved. Org: ' + org + ' | Branch: ' + branch;
-    } else {
-      statusEl.textContent = 'Error: ' + (d.error || 'Unknown error');
-    }
-  } catch(e) {
-    statusEl.textContent = 'Network error: ' + e.message;
-  }
+  statusEl.textContent = 'Source-code settings are saved with the GitHub integration. Open the GitHub tab, enter the token, verify access, and save the configuration.';
+  showTab('tab-github');
 }
 
 document.addEventListener('DOMContentLoaded', function () {

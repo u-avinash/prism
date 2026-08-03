@@ -14,9 +14,9 @@
 
   Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
 """
-"""Helpers for encrypting and decrypting project integration secrets."""
-
 from __future__ import annotations
+
+"""Helpers for encrypting and decrypting project integration secrets."""
 
 import base64
 import hashlib

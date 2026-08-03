@@ -22,8 +22,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Optional, Union
 
-import requests
-
+from integrations.verification import request as integration_request
 from utils.retry_handler import retry_with_backoff
 
 logger = logging.getLogger(__name__)
@@ -222,7 +221,7 @@ class NotificationClient:
             blocks.append({"type": "actions", "elements": actions})
 
         payload: dict = {"attachments": [{"color": color, "blocks": blocks}]}
-        response = requests.post(self.slack_webhook, json=payload, timeout=10)
+        response = integration_request("POST", self.slack_webhook, json=payload, timeout=10)
         response.raise_for_status()
 
     # ── Teams ─────────────────────────────────────────────────────────────────
@@ -277,7 +276,7 @@ class NotificationClient:
         if actions:
             card["potentialAction"] = actions
 
-        response = requests.post(self.teams_webhook, json=card, timeout=10)
+        response = integration_request("POST", self.teams_webhook, json=card, timeout=10)
         response.raise_for_status()
 
     # ── Outbound generic webhooks (Zapier / Make / n8n) ──────────────────────
@@ -350,7 +349,7 @@ class NotificationClient:
                                  url[:40], event, allowed_events)
                     continue
 
-                resp = requests.post(url, json=payload, timeout=10)
+                resp = integration_request("POST", url, json=payload, timeout=10)
                 resp.raise_for_status()
                 sent_count += 1
                 logger.info("[Outbound] Webhook delivered to %s (event=%s)", url[:60], event)

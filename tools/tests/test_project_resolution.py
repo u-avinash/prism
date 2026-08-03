@@ -110,3 +110,58 @@ def test_resolve_project_id_falls_back_only_when_no_app_match_exists(monkeypatch
     resolved = _resolve_project_id_for_incident(None, "order-processing-service", "production")
 
     assert resolved == "PRJ-04A0A733"
+
+
+def test_resolve_project_id_uses_single_configured_github_org_for_any_repo(monkeypatch) -> None:
+    projects = [
+        {
+            "id": "PRJ-NTT",
+            "name": "NTT Data",
+            "repo_url": "",
+            "app_names": [],
+            "environment": "production",
+        }
+    ]
+    configs = {
+        "PRJ-NTT": {
+            "llm": {"provider": "nvidia"},
+            "github": {"org": "avinash-ai-langchain"},
+        }
+    }
+
+    monkeypatch.setattr("storage.auth_store.list_projects", lambda: projects)
+    monkeypatch.setattr("storage.auth_store.get_project_config", lambda project_id: configs[project_id])
+
+    resolved = _resolve_project_id_for_incident(None, "order-processing-service", "production")
+
+    assert resolved == "PRJ-NTT"
+
+
+def test_resolve_project_id_does_not_guess_between_multiple_github_org_projects(monkeypatch) -> None:
+    projects = [
+        {
+            "id": "PRJ-A",
+            "name": "Team A",
+            "repo_url": "",
+            "app_names": [],
+            "environment": "production",
+        },
+        {
+            "id": "PRJ-B",
+            "name": "Team B",
+            "repo_url": "",
+            "app_names": [],
+            "environment": "production",
+        },
+    ]
+    configs = {
+        "PRJ-A": {"github": {"org": "org-a"}},
+        "PRJ-B": {"github": {"org": "org-b"}},
+    }
+
+    monkeypatch.setattr("storage.auth_store.list_projects", lambda: projects)
+    monkeypatch.setattr("storage.auth_store.get_project_config", lambda project_id: configs[project_id])
+
+    resolved = _resolve_project_id_for_incident(None, "order-processing-service", "production")
+
+    assert resolved == "PRJ-A"

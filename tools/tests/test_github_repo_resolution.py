@@ -95,3 +95,28 @@ def test_extract_repo_from_log_derives_repo_from_org_only_mapping() -> None:
     repo = client.extract_repo_from_log("Error in order-processing-service", "order-processing-service")
 
     assert repo == "avinash-ai-langchain/order-processing-service"
+
+
+def test_extract_repo_from_log_resolves_matching_repo_from_configured_org() -> None:
+    """Organization-wide access must work without a legacy app-to-repo mapping."""
+
+    class FakeRepo:
+        full_name = "avinash-ai-langchain/order-processing-service"
+
+    class FakeOrganization:
+        def get_repo(self, name: str):
+            assert name == "order-processing-service"
+            return FakeRepo()
+
+    class FakeGithub:
+        def get_organization(self, name: str):
+            assert name == "avinash-ai-langchain"
+            return FakeOrganization()
+
+    client = _make_client()
+    client.client = FakeGithub()
+    client._get_repo_mappings = lambda: {}  # type: ignore[method-assign]
+
+    repo = client.extract_repo_from_log("Order processing failure", "order-processing-service")
+
+    assert repo == "avinash-ai-langchain/order-processing-service"

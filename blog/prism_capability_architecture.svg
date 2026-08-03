@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1020" viewBox="0 0 1500 1020">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#F7FAFF"/><stop offset="100%" stop-color="#EDF3FB"/></linearGradient>
+<linearGradient id="blue" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#2861D3"/><stop offset="100%" stop-color="#173A8C"/></linearGradient>
+<linearGradient id="teal" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#238FA3"/><stop offset="100%" stop-color="#12667C"/></linearGradient>
+<linearGradient id="gold" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#D89124"/><stop offset="100%" stop-color="#A85F05"/></linearGradient>
+<filter id="sh" x="-20%" y="-25%" width="140%" height="150%"><feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#1D365A" flood-opacity=".13"/></filter>
+<filter id="ls" x="-20%" y="-25%" width="140%" height="150%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#1D365A" flood-opacity=".09"/></filter>
+<marker id="aB" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#2861D3"/></marker>
+<marker id="aG" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#B86E12"/></marker>
+<marker id="aGr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#11754F"/></marker>
+<style>text{font-family:Arial,Helvetica,sans-serif}</style>
+</defs>
+<rect width="1500" height="1020" fill="url(#bg)"/>
+<rect width="1500" height="126" fill="#FFF"/>
+<rect y="122" width="1500" height="4" fill="#2861D3"/>
+<g transform="translate(65,20)">
+  <rect x="0" y="0" width="62" height="62" rx="18" fill="#7C3AED"/>
+  <path d="M31 20l11 11-11 11-11-11z" fill="none" stroke="#FFF" stroke-width="3"/>
+  <path d="M31 25l6 6-6 6-6-6z" fill="#FFF"/>
+  <text x="84" y="31" style="font-size:36px;font-weight:700;fill:#172033">Prism</text>
+  <text x="85" y="53" style="font-size:13px;letter-spacing:1.5px;fill:#64748B">INTELLIGENT INCIDENT RESPONSE</text>
+</g>
+<text x="1430" y="50" text-anchor="end" style="font-size:16px;font-weight:700;fill:#2861D3">Verified capability overview</text>
+<text x="1430" y="76" text-anchor="end" style="font-size:15px;fill:#536983">From production signal to governed engineering action</text>
+<text x="68" y="174" style="font-size:13px;font-weight:700;letter-spacing:1.5px;fill:#536983">01  INTAKE AND PRIORITIZATION</text>
+<text x="468" y="174" style="font-size:13px;font-weight:700;letter-spacing:1.5px;fill:#536983">02  PRISM AI WORKFLOW</text>
+<text x="1138" y="174" style="font-size:13px;font-weight:700;letter-spacing:1.5px;fill:#536983">03  REVIEW AND DELIVERY</text>
+<g filter="url(#sh)"><rect x="65" y="196" width="348" height="300" rx="20" fill="url(#teal)"/></g>
+<circle cx="116" cy="248" r="24" fill="#FFF" opacity=".17"/>
+<path d="M104 248h24M108 239v18M116 239v18M124 239v18M106 262l-5 8M126 262l5 8" stroke="#FFF" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+<text x="155" y="253" style="font-size:20px;font-weight:700;fill:#FFF">Production log signals</text>
+<text x="93" y="300" style="font-size:14px;fill:#FFF">&#x2022; MuleSoft and Anypoint applications</text>
+<text x="93" y="330" style="font-size:14px;fill:#FFF">&#x2022; Any OTLP-compatible service</text>
+<text x="93" y="360" style="font-size:14px;fill:#FFF">&#x2022; OTLP/HTTP log records</text>
+<line x1="93" y1="384" x2="389" y2="384" stroke="#FFF" stroke-opacity=".3"/>
+<text x="93" y="412" style="font-size:14px;font-weight:700;fill:#FFF">Ingestion API: parse, fingerprint,</text>
+<text x="93" y="438" style="font-size:14px;fill:#FFF">deduplicate and classify severity.</text>
+<text x="93" y="464" style="font-size:14px;fill:#FFF">Triggers LangGraph workflow on match.</text>
+<g filter="url(#ls)"><rect x="65" y="530" width="348" height="176" rx="17" fill="#FFF"/></g>
+<text x="92" y="568" style="font-size:17px;font-weight:700;fill:#173662">Persisted incident context</text>
+<circle cx="103" cy="605" r="6" fill="#278DA2"/><text x="120" y="610" style="font-size:13px;fill:#506681">Incident and raw telemetry records</text>
+<circle cx="103" cy="636" r="6" fill="#278DA2"/><text x="120" y="641" style="font-size:13px;fill:#506681">Project and application mapping</text>
+<circle cx="103" cy="667" r="6" fill="#278DA2"/><text x="120" y="672" style="font-size:13px;fill:#506681">SQLite storage for all workflow state</text>
+<circle cx="103" cy="698" r="6" fill="#278DA2"/><text x="120" y="703" style="font-size:13px;fill:#506681">Downloadable patch and PDF paths</text>
+<path d="M425 345 H456" stroke="#2861D3" stroke-width="5" fill="none" marker-end="url(#aB)"/>
+<g filter="url(#sh)"><rect x="468" y="196" width="616" height="510" rx="22" fill="#FFF"/></g>
+<rect x="468" y="196" width="616" height="82" rx="22" fill="url(#blue)"/>
+<rect x="468" y="252" width="616" height="26" fill="url(#blue)"/>
+<circle cx="516" cy="238" r="22" fill="#FFF" opacity=".17"/>
+<path d="M516 223v30M501 238h30M505 227l22 22M527 227l-22 22" stroke="#FFF" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="516" cy="238" r="5" fill="#FFF"/>
+<text x="554" y="246" style="font-size:20px;font-weight:700;fill:#FFF">PRISM LangGraph workflow</text>
+<g filter="url(#ls)"><rect x="496" y="298" width="278" height="90" rx="13" fill="#EEF4FF" stroke="#C9D9FA" stroke-width="1.2"/></g>
+<circle cx="524" cy="343" r="17" fill="#2861D3"/>
+<text x="524" y="348" text-anchor="middle" style="font-size:13px;font-weight:700;fill:#FFF">1</text>
+<text x="552" y="330" style="font-size:14px;font-weight:700;fill:#173662">Assess severity</text>
+<text x="552" y="350" style="font-size:12px;fill:#506681">Threshold-based trigger (HIGH or</text>
+<text x="552" y="368" style="font-size:12px;fill:#506681">CRITICAL). Fires incident notification.</text>
+<g filter="url(#ls)"><rect x="790" y="298" width="278" height="90" rx="13" fill="#EEF4FF" stroke="#C9D9FA" stroke-width="1.2"/></g>
+<circle cx="818" cy="343" r="17" fill="#2861D3"/>
+<text x="818" y="348" text-anchor="middle" style="font-size:13px;font-weight:700;fill:#FFF">2</text>
+<text x="846" y="330" style="font-size:14px;font-weight:700;fill:#173662">Root cause analysis</text>
+<text x="846" y="350" style="font-size:12px;fill:#506681">LLM with fetched GitHub code and</text>
+<text x="846" y="368" style="font-size:12px;fill:#506681">MuleSoft Anypoint runtime context.</text>
+<g filter="url(#ls)"><rect x="496" y="406" width="278" height="90" rx="13" fill="#EEF4FF" stroke="#C9D9FA" stroke-width="1.2"/></g>
+<circle cx="524" cy="451" r="17" fill="#2861D3"/>
+<text x="524" y="456" text-anchor="middle" style="font-size:13px;font-weight:700;fill:#FFF">3</text>
+<text x="552" y="438" style="font-size:14px;font-weight:700;fill:#173662">Generate proposed fix</text>
+<text x="552" y="458" style="font-size:12px;fill:#506681">Language-aware code remediation</text>
+<text x="552" y="476" style="font-size:12px;fill:#506681">with human-readable explanation.</text>
+<g filter="url(#ls)"><rect x="790" y="406" width="278" height="90" rx="13" fill="#EEF4FF" stroke="#C9D9FA" stroke-width="1.2"/></g>
+<circle cx="818" cy="451" r="17" fill="#2861D3"/>
+<text x="818" y="456" text-anchor="middle" style="font-size:13px;font-weight:700;fill:#FFF">4</text>
+<text x="846" y="438" style="font-size:14px;font-weight:700;fill:#173662">Create evidence package</text>
+<text x="846" y="458" style="font-size:12px;fill:#506681">RCA PDF, downloadable patch file,</text>
+<text x="846" y="476" style="font-size:12px;fill:#506681">and quality reflection scores.</text>
+<g filter="url(#ls)"><rect x="496" y="514" width="572" height="88" rx="13" fill="#EAF8F1" stroke="#BBE3D0" stroke-width="1.2"/></g>
+<circle cx="524" cy="558" r="17" fill="#19895E"/>
+<path d="M516 558l6 6 11-14" fill="none" stroke="#FFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="552" y="542" style="font-size:14px;font-weight:700;fill:#173662">Workflow pauses for reviewer decision</text>
+<text x="552" y="562" style="font-size:12px;fill:#506681">No Jira ticket, branch, or PR is created until reviewer explicitly approves.</text>
+<text x="552" y="580" style="font-size:12px;fill:#506681">Reviewer may approve, reject, comment, or request fix regeneration.</text>
+<g filter="url(#ls)"><rect x="496" y="618" width="572" height="56" rx="12" fill="#FFF6E7" stroke="#F0D6A7" stroke-width="1.2"/></g>
+<text x="514" y="638" style="font-size:12px;font-weight:700;fill:#8A560E">Built-in resilience:</text>
+<text x="618" y="638" style="font-size:12px;fill:#506681">automatic retries on generation failures;</text>
+<text x="514" y="657" style="font-size:12px;fill:#506681">failed-state persisted and reported on exhaustion.</text>
+<path d="M1097 342 H1126" stroke="#B86E12" stroke-width="5" fill="none" marker-end="url(#aG)"/>
+<g filter="url(#sh)"><rect x="1138" y="196" width="302" height="306" rx="20" fill="url(#gold)"/></g>
+<circle cx="1186" cy="248" r="24" fill="#FFF" opacity=".17"/>
+<path d="M1174 248l8 8 16-19M1175 233h22M1175 263h22" stroke="#FFF" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="1218" y="254" style="font-size:20px;font-weight:700;fill:#FFF">Human review</text>
+<text x="1160" y="304" style="font-size:14px;font-weight:700;fill:#FFF">Reviewers inspect:</text>
+<text x="1160" y="334" style="font-size:14px;fill:#FFF">&#x2022; RCA and proposed fix diff</text>
+<text x="1160" y="362" style="font-size:14px;fill:#FFF">&#x2022; Downloadable patch file</text>
+<text x="1160" y="390" style="font-size:14px;fill:#FFF">&#x2022; RCA PDF artifact</text>
+<text x="1160" y="418" style="font-size:14px;fill:#FFF">&#x2022; Quality reflection scores</text>
+<line x1="1160" y1="438" x2="1418" y2="438" stroke="#FFF" stroke-opacity=".3"/>
+<text x="1160" y="465" style="font-size:14px;fill:#FFF">Approve, reject, comment,</text>
+<text x="1160" y="490" style="font-size:14px;fill:#FFF">or request fix regeneration.</text>
+<path d="M1289 525 V558" stroke="#11754F" stroke-width="5" fill="none" marker-end="url(#aGr)"/>
+<rect x="1238" y="530" width="104" height="24" rx="12" fill="#E5F6ED"/>
+<text x="1289" y="547" text-anchor="middle" style="font-size:11px;font-weight:700;fill:#11754F">APPROVED</text>
+<g filter="url(#ls)"><rect x="1110" y="570" width="100" height="110" rx="15" fill="#FFF"/></g>
+<circle cx="1160" cy="606" r="18" fill="#EAF2FF"/>
+<path d="M1152 600h16v12h-16zM1156 596h8" stroke="#2861D3" stroke-width="2" fill="none" stroke-linejoin="round"/>
+<text x="1160" y="631" text-anchor="middle" style="font-size:14px;font-weight:700;fill:#173662">Jira</text>
+<text x="1160" y="650" text-anchor="middle" style="font-size:12px;fill:#506681">Issue + patch</text>
+<g filter="url(#ls)"><rect x="1222" y="570" width="100" height="110" rx="15" fill="#FFF"/></g>
+<circle cx="1272" cy="606" r="18" fill="#EAF2FF"/>
+<path d="M1264 606l5-5 5 5 5-5M1269 601v11M1274 601v11" stroke="#2861D3" stroke-width="2.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="1272" y="631" text-anchor="middle" style="font-size:14px;font-weight:700;fill:#173662">GitHub</text>
+<text x="1272" y="650" text-anchor="middle" style="font-size:12px;fill:#506681">Branch + PR</text>
+<g filter="url(#ls)"><rect x="1334" y="570" width="100" height="110" rx="15" fill="#FFF"/></g>
+<circle cx="1384" cy="606" r="18" fill="#EAF2FF"/>
+<path d="M1376 610h16M1379 610v-7a5 5 0 0 1 10 0v7M1382 614h4" stroke="#2861D3" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="1384" y="631" text-anchor="middle" style="font-size:14px;font-weight:700;fill:#173662">Alerts</text>
+<text x="1384" y="650" text-anchor="middle" style="font-size:12px;fill:#506681">Slack / Teams</text>
+<g filter="url(#sh)"><rect x="65" y="748" width="880" height="170" rx="20" fill="#FFF"/></g>
+<rect x="65" y="748" width="10" height="170" rx="5" fill="#2861D3"/>
+<text x="100" y="790" style="font-size:17px;font-weight:700;fill:#173662">PRISM Dashboard and Operational Visibility</text>
+<text x="100" y="816" style="font-size:13px;fill:#506681">Project-scoped live view of incidents, workflow progress, and generated artifacts.</text>
+<line x1="100" y1="836" x2="910" y2="836" stroke="#DCE5F1" stroke-width="1.5"/>
+<text x="116" y="866" style="font-size:12px;font-weight:700;fill:#173662">Incident list and detail</text>
+<text x="316" y="866" style="font-size:12px;font-weight:700;fill:#173662">Live workflow progress</text>
+<text x="516" y="866" style="font-size:12px;font-weight:700;fill:#173662">Artifact downloads</text>
+<text x="690" y="866" style="font-size:12px;font-weight:700;fill:#173662">Signals and audit trail</text>
+<text x="116" y="884" style="font-size:12px;fill:#506681">Approval, comments</text>
+<text x="316" y="884" style="font-size:12px;fill:#506681">SSE real-time updates</text>
+<text x="516" y="884" style="font-size:12px;fill:#506681">RCA PDF, patch file</text>
+<text x="690" y="884" style="font-size:12px;fill:#506681">Logs, metrics, traces</text>
+<g filter="url(#sh)"><rect x="970" y="748" width="470" height="170" rx="20" fill="#FFF"/></g>
+<text x="1002" y="790" style="font-size:17px;font-weight:700;fill:#173662">Project controls</text>
+<circle cx="1012" cy="826" r="6" fill="#19895E"/><text x="1029" y="831" style="font-size:13px;fill:#506681">Admin, Team Admin, and User roles</text>
+<circle cx="1012" cy="856" r="6" fill="#19895E"/><text x="1029" y="861" style="font-size:13px;fill:#506681">Project-scoped integration configuration</text>
+<circle cx="1012" cy="886" r="6" fill="#19895E"/><text x="1029" y="891" style="font-size:13px;fill:#506681">Encrypted integration credentials (Fernet)</text>
+<circle cx="1012" cy="908" r="6" fill="#19895E"/><text x="1029" y="913" style="font-size:13px;fill:#506681">Pluggable LLM: OpenAI, Anthropic, Gemini, Groq</text>
+<line x1="65" y1="950" x2="1435" y2="950" stroke="#D6E1F0" stroke-width="1.5"/>
+<text x="65" y="974" style="font-size:13px;fill:#60738D">PRISM: automated incident intelligence with explicit reviewer control, traceable artifacts, and connected engineering workflows.</text>
+</svg>

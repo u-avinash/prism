@@ -22,6 +22,7 @@ from typing import Optional, List, Dict, Any
 
 from github import Github, GithubException
 
+from integrations.verification import tls_verify_value
 from utils.retry_handler import retry_with_backoff
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,9 @@ class GitHubClient:
     GitHub client for repository operations.
 
     All credentials are loaded from the per-project DB config (stored encrypted).
-    Repo mappings are loaded from the project's repo_mappings DB section.
+    Repositories are resolved automatically from the configured GitHub
+    organization and the incident application name. Legacy DB mappings remain
+    supported only for existing installations.
     No fallback to environment variables, settings.py, or YAML files.
     """
 
@@ -60,7 +63,10 @@ class GitHubClient:
                 + ". Configure via Team Admin → Project Configuration → GitHub."
             )
 
-        self.client = Github(self.token)
+        # PyGithub delegates to Requests. Pass Prism's central TLS policy so
+        # GitHub calls honor an enterprise CA bundle (e.g., a corporate proxy)
+        # while keeping certificate verification enabled by default.
+        self.client = Github(self.token, verify=tls_verify_value())
         logger.info("GitHub client initialised (project_id=%s)", project_id)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -141,14 +147,55 @@ class GitHubClient:
         Resolve the GitHub repository full name for an application.
 
         Resolution order:
-          1. Project's DB repo_mappings (exact match, then case-insensitive)
+          1. Search the configured GitHub organisation by application name
           2. Explicit GitHub URL patterns in the log text
-          3. Search by app name in the configured organisation
-          4. If nothing found: raise ValueError — no silent fallbacks
+          3. Legacy project's DB repo_mappings (exact match, then case-insensitive)
+          4. If nothing found: raise ValueError with source-code configuration guidance
         """
         app_name_norm = (app_name or "").strip()
+        if not app_name_norm:
+            raise ValueError(
+                "Cannot resolve a GitHub repository because the incident has no application name."
+            )
 
-        # ── 1. DB repo mappings (primary source) ──────────────────────────────
+        # ── 1. Search the configured organisation (primary source) ────────────
+        # This is the supported Source Code Configuration workflow. A GitHub
+        # token with access to the organisation's repositories is sufficient;
+        # no per-application mapping is required in the UI.
+        if self.org:
+            try:
+                org = self.client.get_organization(self.org)
+                try:
+                    repo = org.get_repo(app_name_norm)
+                    logger.info("Repo found by exact name in org: %s", repo.full_name)
+                    return self._clean_repo_full_name(repo.full_name)
+                except GithubException as exc:
+                    if exc.status != 404:
+                        raise
+
+                # Some telemetry app names include a deployment suffix or use
+                # a different case. Search accessible repositories as a safe,
+                # best-effort fallback in that case.
+                for repo in org.get_repos():
+                    if app_name_norm.lower() in repo.name.lower():
+                        logger.info("Repo found by fuzzy match in org: %s", repo.full_name)
+                        return self._clean_repo_full_name(repo.full_name)
+            except Exception as exc:
+                logger.warning("GitHub organization search failed for '%s': %s", self.org, exc)
+
+        # ── 2. Explicit GitHub URL patterns in log text ───────────────────────
+        for pattern in (
+            r"github\.com[:/]([^/\s]+/[^/\s]+)",
+            r"git@github\.com:([^/\s]+/[^/\s]+)",
+        ):
+            match = re.search(pattern, log_text, re.IGNORECASE)
+            if match:
+                repo_full_name = self._clean_repo_full_name(match.group(1))
+                if self._is_full_repo_name(repo_full_name):
+                    logger.info("Repo extracted from log URL pattern: %s", repo_full_name)
+                    return repo_full_name
+
+        # ── 3. Legacy DB repo mappings ────────────────────────────────────────
         mappings = self._get_repo_mappings()
         if mappings:
             checked_keys: set[str] = set()
@@ -204,41 +251,12 @@ class GitHubClient:
                             return resolved_repo
                         break
 
-        # ── 2. GitHub URL patterns in log text ────────────────────────────────
-        for pattern in (
-            r"github\.com[:/]([^/\s]+/[^/\s]+)",
-            r"git@github\.com:([^/\s]+/[^/\s]+)",
-        ):
-            match = re.search(pattern, log_text, re.IGNORECASE)
-            if match:
-                repo_full_name = self._clean_repo_full_name(match.group(1))
-                if self._is_full_repo_name(repo_full_name):
-                    logger.info("Repo extracted from log URL pattern: %s", repo_full_name)
-                    return repo_full_name
-
-        # ── 3. Search in configured organisation ─────────────────────────────
-        if self.org:
-            try:
-                org = self.client.get_organization(self.org)
-                # Exact name match
-                try:
-                    repo = org.get_repo(app_name_norm)
-                    logger.info("Repo found by exact name in org: %s", repo.full_name)
-                    return self._clean_repo_full_name(repo.full_name)
-                except GithubException:
-                    pass
-                # Fuzzy match
-                for repo in org.get_repos():
-                    if app_name_norm.lower() in repo.name.lower():
-                        logger.info("Repo found by fuzzy match in org: %s", repo.full_name)
-                        return self._clean_repo_full_name(repo.full_name)
-            except Exception as exc:
-                logger.warning("GitHub org search failed: %s", exc)
-
-        # ── 4. No mapping found ───────────────────────────────────────────────
+        # ── 4. No repository found ────────────────────────────────────────────
         raise ValueError(
-            f"Cannot resolve GitHub repository for application '{app_name_norm}'. "
-            "Add an app→repo mapping via Team Admin → Project Configuration → Repo Mappings."
+            f"Cannot resolve an accessible GitHub repository for application '{app_name_norm}' "
+            f"in organization '{self.org or 'not configured'}'. "
+            "Verify the GitHub organization and token access in Team Admin → "
+            "Project Configuration → GitHub."
         )
 
     # ── File operations ───────────────────────────────────────────────────────
