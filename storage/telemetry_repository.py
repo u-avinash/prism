@@ -38,11 +38,17 @@ class TelemetryLogRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def create(self, log: TelemetryLogCreate, **kwargs) -> TelemetryLog:
-        """Persist a telemetry log entry."""
+    def create(
+        self,
+        log: TelemetryLogCreate,
+        project_id: Optional[str] = None,
+        **kwargs,
+    ) -> TelemetryLog:
+        """Persist a telemetry log entry within an optional tenant boundary."""
         existing_log = self.find_existing(
             timestamp=log.timestamp,
             app_name=log.app_name,
+            project_id=project_id,
             environment=log.environment,
             message=log.message,
             trace_id=log.trace_id,
@@ -57,6 +63,7 @@ class TelemetryLogRepository:
             log_id=log_id,
             timestamp=log.timestamp,
             observed_timestamp=log.observed_timestamp,
+            project_id=project_id,
             app_name=log.app_name,
             environment=log.environment,
             deployment_type=log.deployment_type,
@@ -106,6 +113,7 @@ class TelemetryLogRepository:
         environment: str,
         message: str,
         trace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> Optional[TelemetryLog]:
         """Return an existing log matching the same ingestion fingerprint."""
         query = self.db.query(TelemetryLog).filter(
@@ -114,6 +122,10 @@ class TelemetryLogRepository:
             TelemetryLog.environment == environment,
             TelemetryLog.message == message,
         )
+        if project_id:
+            query = query.filter(TelemetryLog.project_id == project_id)
+        else:
+            query = query.filter(TelemetryLog.project_id.is_(None))
         if trace_id:
             query = query.filter(TelemetryLog.trace_id == trace_id)
         return query.first()
@@ -127,10 +139,13 @@ class TelemetryLogRepository:
         severity: Optional[str] = None,
         search: Optional[str] = None,
         incident_created: Optional[bool] = None,
+        project_id: Optional[str] = None,
     ) -> list[TelemetryLog]:
         """Get telemetry logs with optional filters."""
         query = self.db.query(TelemetryLog)
 
+        if project_id:
+            query = query.filter(TelemetryLog.project_id == project_id)
         if environment:
             query = query.filter(TelemetryLog.environment == environment)
         if app_name:
@@ -156,12 +171,17 @@ class TelemetryLogRepository:
             .all()
         )
 
-    def get_filter_values(self) -> dict:
+    def get_filter_values(self, project_id: Optional[str] = None) -> dict:
         """Return distinct filter values for log viewer dropdowns."""
+        scope = (
+            TelemetryLog.project_id == project_id
+            if project_id
+            else TelemetryLog.project_id.is_(None)
+        )
         environments = [
             row[0]
             for row in self.db.query(TelemetryLog.environment)
-            .filter(TelemetryLog.environment.isnot(None))
+            .filter(TelemetryLog.environment.isnot(None), scope)
             .distinct()
             .order_by(TelemetryLog.environment.asc())
             .all()
@@ -170,7 +190,7 @@ class TelemetryLogRepository:
         apps = [
             row[0]
             for row in self.db.query(TelemetryLog.app_name)
-            .filter(TelemetryLog.app_name.isnot(None))
+            .filter(TelemetryLog.app_name.isnot(None), scope)
             .distinct()
             .order_by(TelemetryLog.app_name.asc())
             .all()
@@ -182,6 +202,7 @@ class TelemetryLogRepository:
         """Serialize telemetry log for API/template use."""
         return {
             "log_id": log.log_id,
+            "project_id": getattr(log, "project_id", None),
             "timestamp": log.timestamp.isoformat() if getattr(log, "timestamp", None) else None,
             "observed_timestamp": log.observed_timestamp.isoformat() if getattr(log, "observed_timestamp", None) else None,
             "app_name": log.app_name,

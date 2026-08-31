@@ -35,12 +35,14 @@
 
   function getToastContainer() {
     if (!_toastContainer) {
+      _toastContainer = document.getElementById('toastContainer');
+    }
+    if (!_toastContainer) {
       _toastContainer = document.createElement('div');
       _toastContainer.id = 'toastContainer';
+      _toastContainer.className = 'toast-container';
       _toastContainer.setAttribute('aria-live', 'polite');
-      _toastContainer.style.cssText =
-        'position:fixed;bottom:24px;right:24px;z-index:9999;' +
-        'display:flex;flex-direction:column;gap:8px;max-width:360px;';
+      _toastContainer.setAttribute('aria-atomic', 'true');
       document.body.appendChild(_toastContainer);
     }
     return _toastContainer;
@@ -97,7 +99,93 @@
   };
 
   /* ─────────────────────────────────────────────────────────────────────
-   * 3. TAB SWITCHING
+   * 3. CONFIRMATION MODAL
+   * ───────────────────────────────────────────────────────────────────── */
+
+  prism.confirm = function (options) {
+    const overlay = document.getElementById('modalOverlay');
+    const modalBox = document.getElementById('modalBox');
+    const title = document.getElementById('modalTitle');
+    const body = document.getElementById('modalBody');
+    const confirmButton = document.getElementById('modalConfirm');
+    const cancelButton = document.getElementById('modalCancel');
+    const closeButton = document.getElementById('modalClose');
+
+    if (!overlay || !title || !body || !confirmButton || !cancelButton || !closeButton) {
+      return Promise.resolve(window.confirm(options.message || 'Are you sure?'));
+    }
+
+    const previousFocus = document.activeElement;
+    title.textContent = options.title || 'Confirm action';
+    body.textContent = options.message || 'Are you sure you want to continue?';
+    confirmButton.textContent = options.confirmLabel || 'Confirm';
+    confirmButton.className = 'btn ' + (options.danger ? 'btn-danger' : 'btn-primary');
+    overlay.hidden = false;
+    overlay.setAttribute('aria-hidden', 'false');
+    confirmButton.focus();
+
+    return new Promise(function (resolve) {
+      let settled = false;
+
+      function finish(confirmed) {
+        if (settled) return;
+        settled = true;
+        overlay.hidden = true;
+        overlay.setAttribute('aria-hidden', 'true');
+        document.removeEventListener('keydown', onKeydown);
+        overlay.removeEventListener('click', onOverlayClick);
+        confirmButton.removeEventListener('click', onConfirm);
+        cancelButton.removeEventListener('click', onCancel);
+        closeButton.removeEventListener('click', onCancel);
+        if (previousFocus && typeof previousFocus.focus === 'function') {
+          previousFocus.focus();
+        }
+        resolve(confirmed);
+      }
+
+      function onConfirm() { finish(true); }
+      function onCancel() { finish(false); }
+      function onKeydown(event) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(false);
+          return;
+        }
+
+        if (event.key === 'Tab' && modalBox) {
+          const focusable = Array.from(modalBox.querySelectorAll(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          )).filter(function (element) {
+            return !element.hidden && element.offsetParent !== null;
+          });
+          if (!focusable.length) return;
+
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }
+      }
+
+      function onOverlayClick(event) {
+        if (event.target === overlay) finish(false);
+      }
+
+      confirmButton.addEventListener('click', onConfirm);
+      cancelButton.addEventListener('click', onCancel);
+      closeButton.addEventListener('click', onCancel);
+      overlay.addEventListener('click', onOverlayClick);
+      document.addEventListener('keydown', onKeydown);
+    });
+  };
+
+  /* ─────────────────────────────────────────────────────────────────────
+   * 4. TAB SWITCHING
    * ───────────────────────────────────────────────────────────────────── */
 
   /**
@@ -211,22 +299,34 @@
         const action = btn.dataset.action; // 'approve' or 'reject'
         const notes  = notesEl ? notesEl.value.trim() : '';
 
-        if (action === 'reject' && !notes) {
-          const ok = confirm('Reject without adding notes?');
-          if (!ok) return;
-        }
+        const confirmation = action === 'reject' && !notes
+          ? prism.confirm({
+              title: 'Reject fix without notes?',
+              message: 'The incident will be rejected without reviewer feedback.',
+              confirmLabel: 'Reject fix',
+              danger: true,
+            })
+          : Promise.resolve(true);
 
-        btn.disabled = true;
-        btn.textContent = action === 'approve' ? 'Approving…' : 'Rejecting…';
+        confirmation.then(function (confirmed) {
+          if (!confirmed) return;
 
-        fetch('/api/incidents/' + incidentId + '/approve', {
+          btn.disabled = true;
+          btn.textContent = action === 'approve' ? 'Approving…' : 'Rejecting…';
+
+          return fetch('/api/incidents/' + incidentId + '/approve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'action=' + encodeURIComponent(action) + '&notes=' + encodeURIComponent(notes),
+            body: 'action=' + encodeURIComponent(action) + '&notes=' + encodeURIComponent(notes),
+          });
         })
-          .then(function (r) { return r.json(); })
+          .then(function (r) {
+            if (!r) return null;
+            return r.json();
+          })
           .then(function (data) {
-            if (data.success || data.status) {
+            if (!data) return;
+            if (data.success || data.status || data.ok) {
               prism.toast(
                 action === 'approve' ? 'Fix approved — workflow continuing.' : 'Incident rejected.',
                 action === 'approve' ? 'success' : 'warning'
@@ -257,18 +357,28 @@
 
     btn.addEventListener('click', function () {
       const incidentId = btn.dataset.incident;
-      if (!confirm('Re-trigger the workflow for incident ' + incidentId + '?')) return;
+      prism.confirm({
+        title: 'Re-trigger workflow?',
+        message: 'This will restart the incident workflow for ' + incidentId + '.',
+        confirmLabel: 'Re-trigger',
+      }).then(function (confirmed) {
+        if (!confirmed) return;
 
-      btn.disabled = true;
-      btn.textContent = '⏳ Triggering…';
+        btn.disabled = true;
+        btn.textContent = '⏳ Triggering…';
 
-      fetch('/api/incidents/' + incidentId + '/trigger', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        return fetch('/api/incidents/' + incidentId + '/trigger', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
       })
-        .then(function (r) { return r.json(); })
+        .then(function (r) {
+          if (!r) return null;
+          return r.json();
+        })
         .then(function (data) {
-          if (data.success || data.message) {
+          if (!data) return;
+          if (data.success || data.message || data.ok) {
             prism.toast('Workflow triggered successfully.', 'success');
             setTimeout(function () { window.location.reload(); }, 1500);
           } else {

@@ -1,20 +1,7 @@
 <!--
-╔══════════════════════════════════════════════════════════════════════╗
-║                          P  R  I  S  M                               ║
-║       Autonomous AI Incident Management System                       ║
-╚══════════════════════════════════════════════════════════════════════╝
-
-  Building an Autonomous AI Incident Management System
-  with LangGraph and OpenTelemetry
-
-  Author   : Upadhyayula Avinash
-  GitHub   : https://github.com/u-avinash
-  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
-  Email    : uavinash.csit@gmail.com
-
-  Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
+  Prism — Intelligent Incident Response
 -->
-<![CDATA[<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -23,103 +10,16 @@
   <link rel="stylesheet" href="/static/app.css" />
   <link rel="stylesheet" href="/static/components.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔷</text></svg>" />
-  <style>
-    /* Topbar user pill */
-    .topbar-user {
-      display: flex;
-      align-items: center;
-      gap: 0.55rem;
-      margin-left: 1rem;
-      padding: 0.35rem 0.9rem 0.35rem 0.7rem;
-      background: rgba(15, 23, 42, 0.85);
-      border: 1.5px solid rgba(139,92,246,.55);
-      border-radius: 9999px;
-      font-size: 0.82rem;
-      box-shadow: 0 2px 8px rgba(0,0,0,.35);
-    }
-    .topbar-user-avatar {
-      width: 1.6rem; height: 1.6rem;
-      border-radius: 50%;
-      background: linear-gradient(135deg,#7c3aed,#4f46e5);
-      color: #fff;
-      font-weight: 700;
-      font-size: 0.78rem;
-      display: flex; align-items: center; justify-content: center;
-      flex-shrink: 0;
-      text-transform: uppercase;
-    }
-    .topbar-user-info { display: flex; flex-direction: column; line-height: 1.2; }
-    .topbar-user-name {
-      font-weight: 700;
-      color: #f1f5f9;
-      font-size: 0.82rem;
-      letter-spacing: .01em;
-    }
-    .topbar-user-role {
-      color: #a78bfa;
-      font-size: 0.68rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: .05em;
-    }
-    .topbar-logout {
-      margin-left: 0.35rem;
-      color: #fca5a5 !important;
-      font-size: 0.78rem !important;
-      font-weight: 600 !important;
-      border: 1.5px solid rgba(239,68,68,.5) !important;
-      border-radius: 6px !important;
-      padding: 0.2rem 0.6rem !important;
-      background: rgba(239,68,68,.08) !important;
-    }
-    .topbar-logout:hover { background: rgba(239,68,68,.22) !important; color: #fff !important; }
-    .topbar-integrations {
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
-      flex-wrap: wrap;
-      margin-left: 0.35rem;
-    }
-    .topbar-integration-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      padding: 0.3rem 0.55rem;
-      border-radius: 999px;
-      border: 1px solid rgba(148, 163, 184, 0.24);
-      background: rgba(255,255,255,0.7);
-      font-size: 0.72rem;
-      font-weight: 600;
-      color: #475569;
-      line-height: 1;
-    }
-    .topbar-integration-pill--online {
-      border-color: #14532d;
-      background: #166534;
-      color: #f0fdf4;
-    }
-    .topbar-integration-pill--offline {
-      border-color: #7f1d1d;
-      background: #991b1b;
-      color: #fef2f2;
-    }
-    .topbar-integration-pill__icon {
-      font-size: 0.8rem;
-      line-height: 1;
-    }
-    .topbar-integration-pill__label {
-      letter-spacing: .01em;
-    }
-  </style>
 </head>
-<body>
+<body data-page="{{ page | default('') }}">
+
+<a class="skip-link" href="#mainContent">Skip to main content</a>
 
 {% set _role = current_user.role if current_user else 'user' %}
 
-<!-- ═══════════════════════════════════════════════════ TOPBAR -->
 <header class="topbar">
   <div class="topbar-brand">
-    <span class="topbar-brand-icon">◈</span>
+    <span class="topbar-brand-icon" aria-hidden="true">◈</span>
     <div class="topbar-brand-text">
       <span class="topbar-brand-name">Prism</span>
       <span class="topbar-brand-sub">Intelligent Incident Response</span>
@@ -128,7 +28,7 @@
 
   <div class="topbar-title">{% block topbar_title %}{% endblock %}</div>
 
-  <div class="topbar-actions">
+  <nav class="topbar-actions" aria-label="Page actions">
     {% block topbar_actions %}
     {% if current_user %}
     <button class="btn btn-ghost btn-sm" id="refreshBtn" type="button" title="Refresh data">↻ Refresh</button>
@@ -143,48 +43,45 @@
       {% endif %}
     {% endif %}
     {% endblock %}
+
     {% if current_user %}
     <div class="topbar-user">
-      <div class="topbar-user-avatar">{{ current_user.username[0] | upper }}</div>
+      <div class="topbar-user-avatar" aria-hidden="true">{{ current_user.username[0] | upper }}</div>
       <div class="topbar-user-info">
         <span class="topbar-user-name">{{ current_user.username }}</span>
-        <span class="topbar-user-role">{% if current_user.role == 'admin' %}🛡 Admin{% elif current_user.role == 'team_admin' %}👔 Team Admin{% else %}👤 {{ current_user.role | replace('_',' ') | title }}{% endif %}</span>
+        <span class="topbar-user-role">
+          {% if current_user.role == 'admin' %}Admin{% elif current_user.role == 'team_admin' %}Team Admin{% else %}{{ current_user.role | replace('_',' ') | title }}{% endif %}
+        </span>
       </div>
-      <a href="/logout" class="btn btn-ghost btn-sm topbar-logout" title="Logout">⏻ Logout</a>
+      <a href="/logout" class="btn btn-ghost btn-sm topbar-logout" title="Logout">Logout</a>
     </div>
     {% endif %}
-  </div>
+  </nav>
 </header>
-<!-- /TOPBAR -->
 
-<!-- ═══════════════════════════════════════════════════ MAIN -->
-<main class="main-content" id="mainContent">
+<main class="main-content" id="mainContent" tabindex="-1">
   {% block content %}{% endblock %}
 </main>
-<!-- /MAIN -->
 
-<!-- ═══════════════════════════════════════════════════ TOAST CONTAINER -->
-<div class="toast-container" id="toastContainer" aria-live="polite"></div>
+<div class="toast-container" id="toastContainer" aria-live="polite" aria-atomic="true"></div>
 
-<!-- ═══════════════════════════════════════════════════ MODAL OVERLAY -->
-<div class="modal-overlay" id="modalOverlay" hidden>
-  <div class="modal" id="modalBox" role="dialog" aria-modal="true">
+<div class="modal-overlay" id="modalOverlay" hidden aria-hidden="true">
+  <div class="modal modal-sm" id="modalBox" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="modal-header">
-      <h3 class="modal-title" id="modalTitle">Confirm</h3>
-      <button class="modal-close" id="modalClose" aria-label="Close modal">✕</button>
+      <h2 class="modal-title" id="modalTitle">Confirm</h2>
+      <button class="modal-close" id="modalClose" type="button" aria-label="Close modal">✕</button>
     </div>
     <div class="modal-body" id="modalBody"></div>
     <div class="modal-footer" id="modalFooter">
-      <button class="btn btn-ghost" id="modalCancel">Cancel</button>
-      <button class="btn btn-primary" id="modalConfirm">Confirm</button>
+      <button class="btn btn-ghost" id="modalCancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="modalConfirm" type="button">Confirm</button>
     </div>
   </div>
 </div>
 
 {% block extra_content %}{% endblock %}
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js" defer></script>
 {% block extra_js %}{% endblock %}
 </body>
 </html>
-]]>

@@ -28,10 +28,12 @@ Default admin credentials:  username=admin  password=ChangeMe123!
 """
 
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from storage.database import ProjectIntegrationConfig, get_session as get_db_session, init_database
@@ -79,12 +81,46 @@ ALL_FEATURES = [
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+_PASSWORD_HASH_ITERATIONS = 310_000
+_SESSION_TTL_SECONDS = int(os.getenv("PRISM_SESSION_TTL_SECONDS", str(60 * 60 * 8)))
+
+
 def _hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Return a salted PBKDF2-HMAC password hash suitable for new credentials."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        _PASSWORD_HASH_ITERATIONS,
+    )
+    return f"pbkdf2_sha256${_PASSWORD_HASH_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def _verify_password(password: str, stored_hash: str) -> tuple[bool, bool]:
+    """Return (is_valid, needs_upgrade), supporting legacy SHA-256 once."""
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        try:
+            algorithm, iterations, salt_hex, digest_hex = stored_hash.split("$", 3)
+            if algorithm != "pbkdf2_sha256":
+                return False, False
+            digest = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                bytes.fromhex(salt_hex),
+                int(iterations),
+            )
+            return hmac.compare_digest(digest.hex(), digest_hex), False
+        except (TypeError, ValueError):
+            return False, False
+
+    # Legacy one-round SHA-256 hashes are upgraded at the next successful login.
+    legacy_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(legacy_hash, stored_hash), True
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _new_id(prefix: str = "") -> str:
@@ -273,12 +309,21 @@ def authenticate(username: str, password: str) -> Optional[dict]:
     """Return user dict on success, None on failure."""
     data = _load()
     _ensure_keys(data)
-    pw_hash = _hash_password(password)
+    matches = []
+    requires_save = False
+    for user in data["users"]:
+        if user.get("username") != username or not user.get("is_active", True):
+            continue
+        valid, needs_upgrade = _verify_password(password, str(user.get("password_hash") or ""))
+        if not valid:
+            continue
+        if needs_upgrade:
+            user["password_hash"] = _hash_password(password)
+            requires_save = True
+        matches.append(user)
 
-    matches = [
-        u for u in data["users"]
-        if u["username"] == username and u["password_hash"] == pw_hash and u.get("is_active", True)
-    ]
+    if requires_save:
+        _save(data)
     if not matches:
         return None
 
@@ -621,8 +666,11 @@ _SESSIONS_FILE = os.path.join(_DATA_DIR, "sessions.json")
 def _load_sessions() -> dict:
     if not os.path.exists(_SESSIONS_FILE):
         return {}
-    with open(_SESSIONS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(_SESSIONS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def _save_sessions(sessions: dict) -> None:
@@ -641,6 +689,7 @@ def create_session(user: dict) -> str:
         "email": user.get("email", ""),
         "features": user.get("features", ["dashboard", "incidents"]),
         "created_at": _now(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=_SESSION_TTL_SECONDS)).isoformat(),
     }
     _save_sessions(sessions)
     return token
@@ -648,7 +697,25 @@ def create_session(user: dict) -> str:
 
 def get_session(token: str) -> Optional[dict]:
     sessions = _load_sessions()
-    return sessions.get(token)
+    session = sessions.get(token)
+    if not session:
+        return None
+
+    expires_at = session.get("expires_at")
+    try:
+        expires = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        # Sessions created before expiry support are invalidated rather than
+        # kept indefinitely.
+        expires = datetime.min.replace(tzinfo=timezone.utc)
+
+    if expires <= datetime.now(timezone.utc):
+        sessions.pop(token, None)
+        _save_sessions(sessions)
+        return None
+    return session
 
 
 def delete_session(token: str) -> None:

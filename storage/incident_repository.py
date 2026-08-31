@@ -16,7 +16,7 @@
 """
 """Repository pattern for incident CRUD operations."""
 from sqlalchemy.orm import Session
-from sqlalchemy import func, cast, Date
+from sqlalchemy import func, cast, Date, or_
 from typing import List, Optional, Dict
 from datetime import datetime, timedelta
 from storage.database import Incident, IncidentComment
@@ -35,8 +35,13 @@ class IncidentRepository:
     def __init__(self, db: Session):
         self.db = db
     
-    def create(self, incident: IncidentCreate, **kwargs) -> Incident:
-        """Create a new incident with a unique alphanumeric ID."""
+    def create(
+        self,
+        incident: IncidentCreate,
+        project_id: Optional[str] = None,
+        **kwargs,
+    ) -> Incident:
+        """Create a new incident with a unique alphanumeric ID and owner."""
         # Get existing IDs to avoid collisions
         existing_ids = {inc.incident_id for inc in self.db.query(Incident.incident_id).all()}
         
@@ -79,6 +84,10 @@ class IncidentRepository:
 
         db_incident = Incident(
             incident_id=incident_id,
+            project_id=project_id or (
+                (incident_metadata or {}).get("project_id")
+                if isinstance(incident_metadata, dict) else None
+            ),
             app_name=incident.app_name,
             environment=incident.environment,
             error_title=incident.error_title,
@@ -104,11 +113,18 @@ class IncidentRepository:
         """Get incident by ID."""
         return self.db.query(Incident).filter(Incident.incident_id == incident_id).first()
     
-    def get_by_fingerprint(self, fingerprint: str) -> Optional[Incident]:
-        """Find existing incident with same fingerprint."""
-        return self.db.query(Incident).filter(
-            Incident.error_fingerprint == fingerprint
-        ).order_by(Incident.created_at.desc()).first()
+    def get_by_fingerprint(
+        self,
+        fingerprint: str,
+        project_id: Optional[str] = None,
+    ) -> Optional[Incident]:
+        """Find an incident with the fingerprint within its tenant boundary."""
+        query = self.db.query(Incident).filter(Incident.error_fingerprint == fingerprint)
+        if project_id:
+            query = query.filter(Incident.project_id == project_id)
+        else:
+            query = query.filter(Incident.project_id.is_(None))
+        return query.order_by(Incident.created_at.desc()).first()
     
     def get_all(
         self,
@@ -118,6 +134,7 @@ class IncidentRepository:
         severity: Optional[str] = None,
         app_name: Optional[str] = None,
         search: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> List[Incident]:
         """Get all incidents with optional filters and full-text search.
 
@@ -128,6 +145,8 @@ class IncidentRepository:
         """
         query = self.db.query(Incident)
 
+        if project_id:
+            query = query.filter(Incident.project_id == project_id)
         if status:
             query = query.filter(Incident.status == status)
         if severity:
@@ -146,13 +165,21 @@ class IncidentRepository:
 
         return query.order_by(Incident.created_at.desc()).offset(offset).limit(limit).all()
     
-    def get_recent_by_app(self, app_name: str, minutes: int = 10) -> List[Incident]:
-        """Get recent incidents for an app within time window."""
+    def get_recent_by_app(
+        self,
+        app_name: str,
+        minutes: int = 10,
+        project_id: Optional[str] = None,
+    ) -> List[Incident]:
+        """Get recent incidents for an app within an optional tenant boundary."""
         cutoff = datetime.utcnow() - timedelta(minutes=minutes)
-        return self.db.query(Incident).filter(
+        query = self.db.query(Incident).filter(
             Incident.app_name == app_name,
-            Incident.created_at >= cutoff
-        ).order_by(Incident.created_at.desc()).all()
+            Incident.created_at >= cutoff,
+        )
+        if project_id:
+            query = query.filter(Incident.project_id == project_id)
+        return query.order_by(Incident.created_at.desc()).all()
     
     def update(self, incident_id: str, **kwargs) -> Optional[Incident]:
         """Update incident fields."""
@@ -170,6 +197,67 @@ class IncidentRepository:
         logger.info(f"Updated incident {incident_id}: {list(kwargs.keys())}")
         return incident
     
+    def acquire_workflow_lease(
+        self,
+        incident_id: str,
+        lease_minutes: int = 30,
+    ) -> Optional[str]:
+        """Atomically reserve an incident for one workflow execution.
+
+        A stale lease may be replaced after ``lease_minutes`` to recover from
+        process crashes. Returns a token when acquired, otherwise ``None``.
+        """
+        token = secrets.token_hex(16)
+        now = datetime.utcnow()
+        stale_before = now - timedelta(minutes=lease_minutes)
+
+        updated_rows = (
+            self.db.query(Incident)
+            .filter(
+                Incident.incident_id == incident_id,
+                or_(
+                    Incident.workflow_run_token.is_(None),
+                    Incident.workflow_started_at.is_(None),
+                    Incident.workflow_started_at < stale_before,
+                ),
+            )
+            .update(
+                {
+                    Incident.workflow_run_token: token,
+                    Incident.workflow_started_at: now,
+                    Incident.updated_at: now,
+                },
+                synchronize_session=False,
+            )
+        )
+        self.db.commit()
+        if updated_rows:
+            logger.info("Acquired workflow lease for incident %s", incident_id)
+            return token
+
+        logger.info("Workflow lease already active for incident %s", incident_id)
+        return None
+
+    def release_workflow_lease(self, incident_id: str, token: str) -> bool:
+        """Release a lease only when this runner still owns it."""
+        updated_rows = (
+            self.db.query(Incident)
+            .filter(
+                Incident.incident_id == incident_id,
+                Incident.workflow_run_token == token,
+            )
+            .update(
+                {
+                    Incident.workflow_run_token: None,
+                    Incident.workflow_started_at: None,
+                    Incident.updated_at: datetime.utcnow(),
+                },
+                synchronize_session=False,
+            )
+        )
+        self.db.commit()
+        return bool(updated_rows)
+
     def update_status(self, incident_id: str, status: IncidentStatus) -> Optional[Incident]:
         """Update incident status."""
         return self.update(incident_id, status=status.value)

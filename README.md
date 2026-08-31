@@ -29,9 +29,10 @@ Prism is an autonomous incident management system that ingests OpenTelemetry log
 5. [Integrations](#integrations)
 6. [Directory Structure](#directory-structure)
 7. [Quick Start](#quick-start)
-8. [Configuration](#configuration)
-9. [API Reference](#api-reference)
-10. [Default Credentials](#default-credentials)
+8. [Quality Gates](#quality-gates)
+9. [Configuration](#configuration)
+10. [API Reference](#api-reference)
+11. [Default Credentials](#default-credentials)
 
 ---
 
@@ -145,11 +146,13 @@ Admin
 
 ### Project Resolution
 
-When an OTLP log arrives the ingestion API calls `_resolve_project_id_for_incident()` to match the log's `app_name` to a project by:
+When an OTLP log arrives, the ingestion API resolves the owning project using the authenticated ingestion context when available, otherwise by matching the log's `app_name` to a project:
 1. Exact match against project `app_names` list
 2. Match against the project's `repo_url` leaf name
 3. Match against `repo_mappings` configured in the project settings
-4. Fallback to the first project that has a configured LLM API key
+4. A narrowly scoped legacy fallback only when there is one unambiguous configured project
+
+The resolved `project_id` is persisted on both the telemetry record and the incident. Duplicate detection is scoped to `(project_id, error_fingerprint)`, and every subsequent workflow action uses that stored owner rather than attempting to re-resolve a project.
 
 ---
 
@@ -267,6 +270,22 @@ prism/
 ```bash
 pip install -r requirements.txt
 ```
+
+### Quality Gates
+
+Run the deterministic regression suite from the project root:
+
+```bash
+python -m pytest
+```
+
+The suite uses an in-memory SQLite database and verifies the critical safety guarantees without calling LLMs or external integrations:
+
+- Error fingerprints cannot deduplicate incidents across projects.
+- An incident workflow has one durable execution lease at a time.
+- Only the lease owner can release the workflow for a later retry.
+
+GitHub Actions runs the same compile and test gate for every pull request and every push to `main` (`.github/workflows/ci.yml`). Legacy scripts under `tools/` remain operational diagnostics and are intentionally excluded from automated pytest discovery.
 
 ### 2. Start the Ingestion API
 

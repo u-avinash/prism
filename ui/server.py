@@ -105,13 +105,10 @@ try:
         remove_user_from_project,
         get_user_projects,
         get_project_users,
-        set_user_features,
-        ALL_FEATURES,
     )
     _AUTH_AVAILABLE = True
 except Exception as _auth_err:
     _AUTH_AVAILABLE = False
-    ALL_FEATURES = []
 
     def _auth_unavailable(*args, **kwargs):
         raise RuntimeError("Authentication store is not available")
@@ -139,7 +136,6 @@ except Exception as _auth_err:
     remove_user_from_project = _auth_unavailable
     get_user_projects = lambda user_id="": []
     get_project_users = lambda project_id="": []
-    set_user_features = _auth_unavailable
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 
@@ -180,6 +176,18 @@ app.mount("/static", StaticFiles(directory=os.path.join(_HERE, "static")), name=
 templates = Jinja2Templates(directory=os.path.join(_HERE, "templates"))
 
 settings = get_settings()
+_COOKIE_SECURE = os.getenv("PRISM_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes"}
+_SESSION_COOKIE_MAX_AGE = int(os.getenv("PRISM_SESSION_TTL_SECONDS", str(60 * 60 * 8)))
+
+
+def _session_cookie_options(max_age: int | None = None) -> dict[str, Any]:
+    """Consistent cookie protections for browser session and context cookies."""
+    return {
+        "httponly": True,
+        "secure": _COOKIE_SECURE,
+        "samesite": "lax",
+        "max_age": _SESSION_COOKIE_MAX_AGE if max_age is None else max_age,
+    }
 
 # Initialize SQLite schema once for the UI process instead of on each request path.
 init_database()
@@ -196,6 +204,24 @@ async def _broadcast(event: str, data: dict) -> None:
             q.put_nowait(payload)
         except asyncio.QueueFull:
             pass
+
+
+# ── Request authentication boundary ──────────────────────────────────────────
+_PUBLIC_API_PATHS = {"/api/health"}
+_ADMIN_ONLY_API_PREFIXES = ("/api/admin/customers",)
+
+
+@app.middleware("http")
+async def require_authenticated_api_requests(request: Request, call_next):
+    """Reject unauthenticated or insufficiently privileged API requests."""
+    path = request.url.path
+    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+        user = _get_current_user(request)
+        if not user:
+            return JSONResponse({"error": "Not authenticated"}, status_code=401)
+        if path.startswith(_ADMIN_ONLY_API_PREFIXES) and user.get("role") != "admin":
+            return JSONResponse({"error": "Admin role required"}, status_code=403)
+    return await call_next(request)
 
 
 # ── Jinja2 template filters / globals ───────────────────────────────────────
@@ -627,6 +653,21 @@ def _get_active_project_id(request: Request, user: Optional[dict]) -> str:
     return str((selected_project or {}).get("id") or "")
 
 
+def _can_manage_project(request: Request, project_id: str) -> bool:
+    """Return whether the caller may administer the specified project."""
+    user = _get_current_user(request)
+    if not user or not project_id:
+        return False
+    if user.get("role") == "admin":
+        return bool(get_project(project_id)) if _AUTH_AVAILABLE else False
+    if user.get("role") != "team_admin":
+        return False
+    return project_id in {
+        str(project.get("id") or "")
+        for project in _get_accessible_projects_with_fallback(user)
+    }
+
+
 def _get_user_id(user: Optional[dict]) -> str:
     if not user:
         return ""
@@ -739,16 +780,15 @@ def _project_candidate_tokens(project: Optional[dict], incident_app_name: Option
 
 def _incident_matches_project(incident: Any, project: Optional[dict]) -> bool:
     if not project:
-        return True
+        return False
 
     incident_app_name = (getattr(incident, "app_name", None) or "").strip()
     normalized_incident_app = _normalize_project_token(incident_app_name)
     candidate_tokens = _project_candidate_tokens(project, incident_app_name)
 
     if candidate_tokens:
-        return (
-            not normalized_incident_app
-            or normalized_incident_app in candidate_tokens
+        return bool(normalized_incident_app) and (
+            normalized_incident_app in candidate_tokens
             or any(
                 normalized_incident_app in candidate_token or candidate_token in normalized_incident_app
                 for candidate_token in candidate_tokens
@@ -770,7 +810,20 @@ def _incident_matches_project(incident: Any, project: Optional[dict]) -> bool:
         except Exception:
             pass
 
-    return True
+    return False
+
+
+def _can_access_incident(request: Request, incident: Any) -> bool:
+    """Ensure an incident belongs to the caller's selected accessible project."""
+    user = _get_current_user(request)
+    selected_project = _get_selected_project(request, user)
+    return bool(selected_project and _incident_matches_project(incident, selected_project))
+
+
+def _incident_access_error(request: Request, incident: Any) -> Optional[JSONResponse]:
+    if _can_access_incident(request, incident):
+        return None
+    return JSONResponse({"error": "Incident not found"}, status_code=404)
 
 
 def _configured_integrations(project_config: Optional[dict]) -> dict:
@@ -791,7 +844,7 @@ def _configured_integrations(project_config: Optional[dict]) -> dict:
 
     return {
         key: _section_is_configured(key)
-        for key in ["llm", "jira", "github", "anypoint", "slack", "teams"]
+        for key in ["llm", "jira", "github", "slack", "teams"]
     }
 
 
@@ -813,7 +866,6 @@ def _get_project_integration_summary(project: Optional[dict]) -> list[dict]:
         "llm": "LLM",
         "jira": "Jira",
         "github": "GitHub",
-        "anypoint": "Anypoint",
         "slack": "Slack",
         "teams": "Teams",
     }
@@ -868,7 +920,6 @@ def _integration_config_fingerprint(
         "llm": "api_key",
         "jira": "api_token",
         "github": "token",
-        "anypoint": "client_secret",
         "slack": "webhook_url",
         "teams": "webhook_url",
     }
@@ -940,7 +991,6 @@ def _masked_secret_status(project_config: Optional[dict]) -> dict:
         "llm": "api_key_configured",
         "jira": "api_token_configured",
         "github": "token_configured",
-        "anypoint": "client_secret_configured",
         "slack": "webhook_url_configured",
         "teams": "webhook_url_configured",
     }.items():
@@ -1002,7 +1052,6 @@ def _build_demo_readiness(project: Optional[dict]) -> dict:
         ("llm", "LLM"),
         ("jira", "Jira"),
         ("github", "GitHub"),
-        ("anypoint", "Anypoint"),
         ("slack", "Slack"),
         ("teams", "Teams"),
     ]:
@@ -1432,25 +1481,11 @@ def _sample_audit_rows(selected_project: Optional[dict]) -> list[dict]:
 # ── Auth helpers ─────────────────────────────────────────────────────────────
 
 def _get_current_user(request: Request) -> Optional[dict]:
-    """Return the current user from the session cookie, or None if not authenticated.
-
-    When the auth store is unavailable (``_AUTH_AVAILABLE = False``), a minimal
-    dev-mode user is returned ONLY when a session cookie is already present.
-    Without a cookie the function returns None, forcing the caller to redirect
-    to the login page — this prevents unauthenticated direct-URL access even in
-    dev / no-auth-store mode.
-    """
-    token = request.cookies.get("session")
+    """Return the authenticated user for a valid, unexpired server-side session."""
     if not _AUTH_AVAILABLE:
-        # Auth store unavailable (first-run or misconfigured environment).
-        # Require at least a browser cookie so direct-URL access without ever
-        # visiting /login is blocked.
-        if not token:
-            return None
-        return {"id": "USR-ADMIN", "username": "admin", "role": "admin", "features": []}
-    if not token:
         return None
-    return get_session(token)
+    token = request.cookies.get("session")
+    return get_session(token) if token else None
 
 
 def _require_auth(request: Request) -> Optional[RedirectResponse]:
@@ -1464,17 +1499,11 @@ def _require_auth(request: Request) -> Optional[RedirectResponse]:
 def _require_role(request: Request, *roles: str) -> Optional[RedirectResponse]:
     """Require the current user to have one of the given roles.
 
-    When the auth store is unavailable all role checks are skipped so that
-    admin/team-admin pages remain accessible in dev/fallback mode — but the
-    user still needs to have a session cookie (enforced by ``_require_auth``
-    being called first on every protected page).
+    Authentication-store failures are fail-closed: privileged pages cannot be
+    served until the store is available again.
     """
     if not _AUTH_AVAILABLE:
-        # Still require a cookie even without a full auth store
-        user = _get_current_user(request)
-        if not user:
-            return RedirectResponse(url="/login", status_code=302)
-        return None
+        return RedirectResponse(url="/login", status_code=302)
     user = _get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -1514,13 +1543,12 @@ async def login_post(
     password: str = Form(...),
 ):
     if not _AUTH_AVAILABLE:
-        # Auth store unavailable — set a dev-mode session cookie so the user
-        # can access protected pages.  Any credentials are accepted.
-        import secrets as _secrets
-        dev_token = _secrets.token_hex(16)
-        resp = RedirectResponse(url="/incidents", status_code=302)
-        resp.set_cookie("session", dev_token, httponly=True, max_age=86400 * 7)
-        return resp
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "Authentication is temporarily unavailable. Please contact an administrator."},
+            status_code=503,
+        )
     user = authenticate_user(username, password)
     if not user:
         return templates.TemplateResponse(
@@ -1529,7 +1557,7 @@ async def login_post(
     token = create_session(user)
     home = _role_home(user.get("role", "user"))
     resp = RedirectResponse(url=home, status_code=302)
-    resp.set_cookie("session", token, httponly=True, max_age=86400 * 7)
+    resp.set_cookie("session", token, **_session_cookie_options())
     return resp
 
 
@@ -1539,7 +1567,7 @@ async def logout(request: Request):
     if token and _AUTH_AVAILABLE:
         delete_session(token)
     resp = RedirectResponse(url="/login", status_code=302)
-    resp.delete_cookie("session")
+    resp.delete_cookie("session", httponly=True, secure=_COOKIE_SECURE, samesite="lax")
     return resp
 
 
@@ -1549,6 +1577,9 @@ async def logout(request: Request):
 
 @app.get("/onboarding", response_class=HTMLResponse)
 async def onboarding_page(request: Request, step: int = 1):
+    auth_redirect = _require_role(request, "admin")
+    if auth_redirect:
+        return auth_redirect
     return templates.TemplateResponse(
         request,
         "onboarding.html",
@@ -1565,6 +1596,9 @@ async def onboarding_step1(
     stack: str = Form(default=""),
     environment: str = Form(default="production"),
 ):
+    auth_redirect = _require_role(request, "admin")
+    if auth_redirect:
+        return auth_redirect
     if not name.strip():
         return templates.TemplateResponse(
             request,
@@ -1584,7 +1618,7 @@ async def onboarding_step1(
 
     # Store in session cookie so step2 knows the project name
     resp = RedirectResponse(url="/onboarding?step=2", status_code=302)
-    resp.set_cookie("ob_project", name, httponly=True, max_age=3600)
+    resp.set_cookie("ob_project", name, **_session_cookie_options(max_age=3600))
     return resp
 
 
@@ -1594,6 +1628,9 @@ async def onboarding_step2(
     team_name: str = Form(...),
     team_description: str = Form(default=""),
 ):
+    auth_redirect = _require_role(request, "admin")
+    if auth_redirect:
+        return auth_redirect
     if not team_name.strip():
         return templates.TemplateResponse(
             request,
@@ -1630,7 +1667,7 @@ async def onboarding_step2(
         "onboarding.html",
         {"step": 3, "error": None, "form": {}, "summary": summary},
     )
-    resp.delete_cookie("ob_project")
+    resp.delete_cookie("ob_project", httponly=True, secure=_COOKIE_SECURE, samesite="lax")
     return resp
 
 
@@ -1854,7 +1891,6 @@ async def team_admin_onboarding_page(request: Request, project_id: str = Query(d
             "integration_config": config,
             "team_members": members,
             "available_users": available_users,
-            "all_features": ALL_FEATURES if _AUTH_AVAILABLE else [],
             "error": None,
             "success": None,
             "page": "team_admin_onboarding",
@@ -1879,7 +1915,9 @@ async def team_admin_onboarding_post(request: Request):
     error = None
     success = None
 
-    if _AUTH_AVAILABLE and project_id and section:
+    if project_id and not _can_manage_project(request, project_id):
+        error = "Project access denied."
+    elif _AUTH_AVAILABLE and project_id and section:
         try:
             update_project_config(project_id, section, values)
             success = f"'{section}' configuration saved."
@@ -1903,7 +1941,6 @@ async def team_admin_onboarding_post(request: Request):
             "selected_project": selected_project,
             "integration_config": config,
             "team_members": members,
-            "all_features": ALL_FEATURES if _AUTH_AVAILABLE else [],
             "error": error,
             "success": success,
             "page": "team_admin_onboarding",
@@ -1932,11 +1969,12 @@ async def api_team_admin_add_member(request: Request):
     email = (body.get("email") or "").strip()
     password = (body.get("password") or "").strip()
     full_name = (body.get("full_name") or "").strip()
-    features = body.get("feature_access") or []
     project_ids = body.get("project_ids") or []
 
     if not username or not email or not password:
         return JSONResponse({"error": "username, email and password are required"}, status_code=400)
+    if not project_ids or any(not _can_manage_project(request, str(pid)) for pid in project_ids):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
 
     try:
         all_users = list_users()
@@ -1954,8 +1992,6 @@ async def api_team_admin_add_member(request: Request):
         for pid in project_ids:
             if pid:
                 assign_user_to_project(new_user["id"], pid)
-        if features:
-            set_user_features(new_user["id"], features)
         return JSONResponse({"success": True, "user": new_user}, status_code=201)
     except Exception as exc:
         logger.error("add-member error: %s", exc, exc_info=True)
@@ -1964,7 +2000,7 @@ async def api_team_admin_add_member(request: Request):
 
 @app.post("/api/team-admin/integration/{int_type}")
 async def api_team_admin_save_integration(int_type: str, request: Request):
-    """Save integration config for a project (LLM, Jira, GitHub, Anypoint, Slack, Teams)."""
+    """Save integration config for a project (LLM, Jira, GitHub, Slack, Teams)."""
     redir = _require_role(request, "team_admin", "admin")
     if redir:
         return JSONResponse({"error": "Unauthorized"}, status_code=403)
@@ -1983,8 +2019,10 @@ async def api_team_admin_save_integration(int_type: str, request: Request):
 
     if not project_id:
         return JSONResponse({"error": "No project found for this user"}, status_code=400)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
 
-    if int_type not in {"llm", "jira", "github", "anypoint", "slack", "teams"}:
+    if int_type not in {"llm", "jira", "github", "slack", "teams"}:
         return JSONResponse({"error": f"Unsupported integration type: {int_type}"}, status_code=400)
 
     verification_token = str(body.get("verification_token") or "")
@@ -2044,6 +2082,8 @@ async def api_team_admin_delete_integration(int_type: str, request: Request):
 
     if not project_id:
         return JSONResponse({"error": "No project found for this user"}, status_code=400)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
 
     try:
         clear_project_config(project_id, int_type)
@@ -2061,6 +2101,8 @@ async def api_get_repo_mappings(request: Request, project_id: str = Query(defaul
         return JSONResponse({"error": "Unauthorized"}, status_code=403)
     if not _AUTH_AVAILABLE or not project_id:
         return JSONResponse({})
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
     try:
         from storage.auth_store import get_app_repo_mapping
         return JSONResponse(get_app_repo_mapping(project_id))
@@ -2087,6 +2129,8 @@ async def api_save_repo_mappings(request: Request):
         project_id = _get_active_project_id(request, user)
     if not project_id:
         return JSONResponse({"error": "No project found for this user"}, status_code=400)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
 
     mappings = body.get("mappings") or {}
     if not isinstance(mappings, dict):
@@ -2131,7 +2175,15 @@ async def api_save_repo_mappings(request: Request):
 
 @app.post("/api/team-admin/runtime-config")
 async def api_team_admin_save_runtime_config(request: Request):
-    """Save project-scoped runtime configuration for the active project."""
+    """Save the project description for the active project.
+
+    Infrastructure-level runtime settings (database path, PDF/patch output
+    directories, OTLP collector port) are process-wide, not per-project, and
+    are configured once via environment variables — see the README's
+    Configuration section. Persisting per-project overrides for them here
+    would be silently ignored by the running application, so only the
+    project description is accepted by this endpoint.
+    """
     redir = _require_role(request, "team_admin", "admin")
     if redir:
         return JSONResponse({"error": "Unauthorized"}, status_code=403)
@@ -2150,40 +2202,14 @@ async def api_team_admin_save_runtime_config(request: Request):
 
     if not project_id:
         return JSONResponse({"error": "No project found for this user"}, status_code=400)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
 
     description = str(body.get("description") or "").strip()
-    otlp_collector_port = str(body.get("otlp_collector_port") or "").strip()
-    database_path = str(body.get("database_path") or "").strip()
-    pdf_output_dir = str(body.get("pdf_output_dir") or "").strip()
-    patch_output_dir = str(body.get("patch_output_dir") or "").strip()
-
-    if not otlp_collector_port:
-        return JSONResponse({"error": "OpenTelemetry collector port is required."}, status_code=400)
-    if not otlp_collector_port.isdigit():
-        return JSONResponse({"error": "OpenTelemetry collector port must be numeric."}, status_code=400)
-
-    otlp_port_value = int(otlp_collector_port)
-    if otlp_port_value < 1 or otlp_port_value > 65535:
-        return JSONResponse({"error": "OpenTelemetry collector port must be between 1 and 65535."}, status_code=400)
-
-    if not database_path:
-        return JSONResponse({"error": "Database path is required."}, status_code=400)
-    if not pdf_output_dir:
-        return JSONResponse({"error": "PDF output directory is required."}, status_code=400)
-    if not patch_output_dir:
-        return JSONResponse({"error": "Patch output directory is required."}, status_code=400)
-
-    runtime_config = {
-        "otlp_collector_port": otlp_port_value,
-        "database_path": database_path,
-        "pdf_output_dir": pdf_output_dir,
-        "patch_output_dir": patch_output_dir,
-    }
 
     try:
         update_project(project_id, {"description": description})
-        update_project_config(project_id, "runtime", runtime_config)
-        return JSONResponse({"success": True, "project_id": project_id, "runtime": runtime_config, "description": description})
+        return JSONResponse({"success": True, "project_id": project_id, "description": description})
     except Exception as exc:
         logger.error("save-runtime-config error: %s", exc, exc_info=True)
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -2201,17 +2227,22 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
     except Exception:
         body = {}
 
+    project_id = (body.get("project_id") or "").strip()
+    if not project_id:
+        project_id = _get_active_project_id(request, _get_current_user(request))
+    if not project_id or not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
+    body["project_id"] = project_id
+
     # A masked secret is intentionally omitted by the browser. Reuse the
     # project-scoped encrypted value so existing integrations can be tested
     # without forcing an administrator to re-enter every credential.
-    project_id = (body.get("project_id") or "").strip()
     if project_id and _AUTH_AVAILABLE:
         stored_config = get_project_config(project_id) or {}
         secret_fields = {
             "llm": "api_key",
             "jira": "api_token",
             "github": "token",
-            "anypoint": "client_secret",
             "slack": "webhook_url",
             "teams": "webhook_url",
         }
@@ -2225,7 +2256,6 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
         "llm": "LLM provider",
         "jira": "Jira",
         "github": "GitHub",
-        "anypoint": "Anypoint Platform",
         "slack": "Slack",
         "teams": "Microsoft Teams",
     }
@@ -2504,131 +2534,6 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
         except requests.RequestException as exc:
             return JSONResponse({"success": False, "error": f"Unable to reach Microsoft Teams: {exc}"}, status_code=400)
 
-    if int_type == "anypoint":
-        client_id = (body.get("client_id") or "").strip()
-        client_secret = (body.get("client_secret") or "").strip()
-        org_id = (body.get("org_id") or "").strip()
-
-        if not client_id:
-            return JSONResponse({"success": False, "error": "Anypoint client ID is required."}, status_code=400)
-        if not client_secret:
-            return JSONResponse({"success": False, "error": "Anypoint client secret is required."}, status_code=400)
-
-        token_urls = [
-            "https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token",
-            "https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token/",
-            "https://anypoint.mulesoft.com/accounts/login",
-        ]
-
-        token_response = None
-        last_exception = None
-
-        for token_url in token_urls:
-            try:
-                token_response = integration_request(
-                    "POST",
-                    token_url,
-                    data={
-                        "grant_type": "client_credentials",
-                        "client_id": client_id,
-                        "client_secret": client_secret,
-                    },
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                )
-                if token_response.status_code in (200, 201):
-                    break
-            except requests.RequestException as exc:
-                last_exception = exc
-
-        if token_response is None:
-            if isinstance(last_exception, requests.SSLError):
-                return JSONResponse(
-                    {"success": False, "error": str(connection_error("Anypoint Platform", last_exception))},
-                    status_code=400,
-                )
-            return JSONResponse(
-                {"success": False, "error": "Unable to reach Anypoint Platform. Check network access and proxy configuration."},
-                status_code=400,
-            )
-
-        if token_response.status_code in (401, 403):
-            return JSONResponse(
-                {
-                    "success": False,
-                    "error": "Anypoint authentication failed. Check the client ID and client secret.",
-                },
-                status_code=400,
-            )
-
-        if token_response.status_code not in (200, 201):
-            return JSONResponse(
-                {
-                    "success": False,
-                    "error": f"Anypoint token request failed with status {token_response.status_code}: {sanitized_response_text(token_response)}",
-                },
-                status_code=400,
-            )
-
-        try:
-            token_data = token_response.json()
-        except ValueError:
-            return JSONResponse(
-                {
-                    "success": False,
-                    "error": f"Anypoint returned a non-JSON token response: {sanitized_response_text(token_response)}",
-                },
-                status_code=400,
-            )
-
-        access_token = token_data.get("access_token")
-        if not access_token:
-            return JSONResponse({"success": False, "error": "Anypoint did not return an access token."}, status_code=400)
-
-        if org_id:
-            try:
-                org_response = integration_request(
-                    "GET",
-                    f"https://anypoint.mulesoft.com/accounts/api/organizations/{org_id}",
-                    headers={
-                        "Authorization": f"Bearer {access_token}",
-                        "Accept": "application/json",
-                    },
-                )
-            except requests.SSLError as exc:
-                return JSONResponse(
-                    {"success": False, "error": str(connection_error("Anypoint Platform", exc))},
-                    status_code=400,
-                )
-            except requests.RequestException:
-                return JSONResponse(
-                    {"success": False, "error": "Unable to validate the Anypoint organization. Check network access and organization ID."},
-                    status_code=400,
-                )
-
-            if org_response.status_code == 404:
-                return JSONResponse(
-                    {"success": False, "error": f'Anypoint organization "{org_id}" was not found.'},
-                    status_code=400,
-                )
-            if org_response.status_code not in (200, 204):
-                return JSONResponse(
-                    {
-                        "success": False,
-                        "error": f"Anypoint organization validation failed with status {org_response.status_code}: {sanitized_response_text(org_response)}",
-                    },
-                    status_code=400,
-                )
-
-        message = "Anypoint Platform connection verified successfully."
-        if org_id:
-            message += f" Organization '{org_id}' is reachable."
-        return _verified_integration_response(
-            request, project_id, int_type, body, message
-        )
-
     label = _type_labels.get(int_type, int_type.upper())
     return JSONResponse({"success": True, "message": f"{label} connection test succeeded (stub)."})
 
@@ -2643,11 +2548,12 @@ async def api_team_add_member(request: Request):
     username = body.get("username", "").strip()
     email = body.get("email", "").strip()
     password = body.get("password", "")
-    features = body.get("features", [])
     if not username or not email or not password:
         return JSONResponse({"error": "username, email and password are required"}, status_code=400)
     if not _AUTH_AVAILABLE:
         return JSONResponse({"error": "Auth not available"}, status_code=503)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
     try:
         all_users = list_users()
         existing = next((u for u in all_users if u.get("email", "").lower() == email.lower()), None)
@@ -2656,8 +2562,6 @@ async def api_team_add_member(request: Request):
         else:
             new_user = create_user({"username": username, "email": email, "password": password, "role": "user"})
         assign_user_to_project(new_user["id"], project_id)
-        if features:
-            set_user_features(new_user["id"], features)
         return JSONResponse({"success": True, "user": new_user}, status_code=201)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -2672,25 +2576,11 @@ async def api_team_remove_member(user_id: str, request: Request):
     project_id = body.get("project_id", "")
     if not _AUTH_AVAILABLE:
         return JSONResponse({"error": "Auth not available"}, status_code=503)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
     try:
         remove_user_from_project(user_id, project_id)
         return JSONResponse({"success": True})
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-
-@app.put("/api/team/members/{user_id}/features")
-async def api_team_update_features(user_id: str, request: Request):
-    redir = _require_role(request, "team_admin", "admin")
-    if redir:
-        return JSONResponse({"error": "Unauthorized"}, status_code=403)
-    body = await request.json()
-    features = body.get("features", [])
-    if not _AUTH_AVAILABLE:
-        return JSONResponse({"error": "Auth not available"}, status_code=503)
-    try:
-        updated = set_user_features(user_id, features)
-        return JSONResponse({"success": True, "user": updated})
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -2705,6 +2595,8 @@ async def api_team_save_integration(request: Request):
     int_type = body.get("type", "")
     if not project_id or not int_type:
         return JSONResponse({"error": "project_id and type required"}, status_code=400)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
     if not _AUTH_AVAILABLE:
         return JSONResponse({"error": "Auth not available"}, status_code=503)
     try:
@@ -2722,6 +2614,8 @@ async def api_team_get_environments(request: Request, project_id: str = Query(de
         return JSONResponse({"error": "Unauthorized"}, status_code=403)
     if not _AUTH_AVAILABLE or not project_id:
         return JSONResponse([])
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
     try:
         config = get_project_config(project_id) or {}
         envs = config.get("environments", [])
@@ -2741,6 +2635,8 @@ async def api_team_add_environment(request: Request):
     env_type = body.get("type", "").strip()
     if not project_id or not env_name:
         return JSONResponse({"error": "project_id and name are required"}, status_code=400)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
     if not _AUTH_AVAILABLE:
         return JSONResponse({"error": "Auth not available"}, status_code=503)
     try:
@@ -2764,6 +2660,8 @@ async def api_team_delete_environment(env_id: str, request: Request):
     project_id = body.get("project_id", "")
     if not _AUTH_AVAILABLE:
         return JSONResponse({"error": "Auth not available"}, status_code=503)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
     try:
         config = get_project_config(project_id) or {}
         envs = [e for e in config.get("environments", []) if e.get("id") != env_id]
@@ -2783,6 +2681,8 @@ async def api_assign_user_to_project(request: Request):
     project_id = body.get("project_id")
     if not user_id or not project_id:
         raise HTTPException(400, "user_id and project_id required")
+    if not _can_manage_project(request, str(project_id)):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
     if _AUTH_AVAILABLE:
         assign_user_to_project(user_id, project_id)
     return {"ok": True}
@@ -2798,23 +2698,11 @@ async def api_remove_user_from_project(request: Request):
     project_id = body.get("project_id")
     if not user_id or not project_id:
         raise HTTPException(400, "user_id and project_id required")
+    if not _can_manage_project(request, str(project_id)):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
     if _AUTH_AVAILABLE:
         remove_user_from_project(user_id, project_id)
     return {"ok": True}
-
-
-@app.post("/api/team-admin/set-features")
-async def api_set_user_features(request: Request):
-    redir = _require_role(request, "team_admin", "admin")
-    if redir:
-        return JSONResponse({"error": "Unauthorized"}, status_code=403)
-    body = await request.json()
-    user_id = body.get("user_id")
-    features = body.get("features", [])
-    if not user_id:
-        raise HTTPException(400, "user_id required")
-    result = set_user_features(user_id, features) if _AUTH_AVAILABLE else None
-    return {"ok": True, "user": result}
 
 
 @app.post("/api/admin/users", status_code=201)
@@ -3069,7 +2957,9 @@ async def api_admin_delete_project(project_id: str, request: Request):
 
 
 @app.get("/api/projects/{project_id}/users")
-async def api_get_project_users(project_id: str):
+async def api_get_project_users(project_id: str, request: Request):
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
     return get_project_users(project_id) if _AUTH_AVAILABLE else []
 
 
@@ -3101,18 +2991,13 @@ async def incidents_page(
     selected_project = _get_selected_project(request, user)
     all_incidents = repo.get_all(limit=1000, search=search or None)
 
-    if selected_project:
-        project_scoped_incidents = [
+    if not selected_project:
+        all_incidents = []
+    else:
+        all_incidents = [
             incident for incident in all_incidents
             if _incident_matches_project(incident, selected_project)
         ]
-        if project_scoped_incidents:
-            all_incidents = project_scoped_incidents
-        else:
-            logger.info(
-                "No project-scoped incident matches found for project '%s' after app/repo/app_names mapping; showing all incidents instead",
-                selected_project.get("name"),
-            )
 
     # Available filter options
     all_severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
@@ -3164,7 +3049,7 @@ async def incident_detail(
     if auth_redirect:
         return auth_redirect
     inc = repo.get_by_id(incident_id)
-    if not inc:
+    if not inc or not _can_access_incident(request, inc):
         raise HTTPException(status_code=404, detail="Incident not found")
 
     rca_text = _incident_rca_text(inc)
@@ -3425,7 +3310,7 @@ async def incident_artifact(
         return auth_redirect
 
     inc = repo.get_by_id(incident_id)
-    if not inc:
+    if not inc or not _can_access_incident(request, inc):
         raise HTTPException(status_code=404, detail="Incident not found")
 
     if artifact_kind == "pdf":
@@ -3516,30 +3401,33 @@ async def api_health():
 
 
 @app.get("/api/stats")
-async def api_stats(repo: IncidentRepository = Depends(get_repository)):
-    """Return aggregate statistics using efficient SQL COUNT queries."""
-    try:
-        stats = repo.get_stats()
-        # Normalise keys for backward compat with the existing dashboard template
-        return {
-            "total": stats["total_incidents"],
-            "total_incidents": stats["total_incidents"],
-            "critical": stats["by_severity"].get("CRITICAL", 0),
-            "high": stats["by_severity"].get("HIGH", 0),
-            "medium": stats["by_severity"].get("MEDIUM", 0),
-            "low": stats["by_severity"].get("LOW", 0),
-            "pending_approval": stats["pending_approval"],
-            "prs_created": stats["prs_created"],
-            "jira_created": stats["jira_created"],
-            "completed": stats["completed"],
-            "with_rca": stats["with_rca"],
-            "by_severity": stats["by_severity"],
-            "by_status": stats["by_status"],
-        }
-    except Exception:
-        # Fallback to Python aggregation if SQL method fails
-        incidents = repo.get_all(limit=1000)
-        return _compute_stats(incidents)
+async def api_stats(
+    request: Request,
+    repo: IncidentRepository = Depends(get_repository),
+):
+    """Return statistics scoped to the caller's selected accessible project."""
+    user = _get_current_user(request)
+    selected_project = _get_selected_project(request, user)
+    incidents = [
+        incident for incident in repo.get_all(limit=1000)
+        if selected_project and _incident_matches_project(incident, selected_project)
+    ]
+    stats = _compute_stats(incidents)
+    return {
+        "total": stats["total"],
+        "total_incidents": stats["total"],
+        "critical": stats["critical"],
+        "high": stats["high"],
+        "medium": stats["medium"],
+        "low": stats["low"],
+        "pending_approval": stats["pending_approval"],
+        "prs_created": stats["prs_created"],
+        "jira_created": stats["jira_created"],
+        "completed": stats["completed"],
+        "with_rca": sum(1 for incident in incidents if _incident_rca_text(incident)),
+        "by_severity": stats["by_severity"],
+        "by_status": stats["by_status"],
+    }
 
 
 @app.get("/api/incidents")
@@ -3565,13 +3453,13 @@ async def api_incidents(
         search=search or None,
     )
 
-    if selected_project:
-        project_scoped_incidents = [
+    if not selected_project:
+        incidents = []
+    else:
+        incidents = [
             incident for incident in incidents
             if _incident_matches_project(incident, selected_project)
         ]
-        if project_scoped_incidents:
-            incidents = project_scoped_incidents
 
     if severity:
         severity_set = {value for value in severity if value}
@@ -3617,13 +3505,13 @@ async def api_export_incidents_csv(
 
     incidents = repo.get_all(limit=10000, search=search)
 
-    if selected_project:
-        project_scoped_incidents = [
+    if not selected_project:
+        incidents = []
+    else:
+        incidents = [
             incident for incident in incidents
             if _incident_matches_project(incident, selected_project)
         ]
-        if project_scoped_incidents:
-            incidents = project_scoped_incidents
 
     if severity:
         severity_set = {value for value in severity if value}
@@ -3677,17 +3565,19 @@ async def api_export_incidents_csv(
 
 @app.get("/api/incidents/{incident_id}")
 async def api_incident(
+    request: Request,
     incident_id: str,
     repo: IncidentRepository = Depends(get_repository),
 ):
     inc = repo.get_by_id(incident_id)
-    if not inc:
+    if not inc or not _can_access_incident(request, inc):
         raise HTTPException(status_code=404, detail="Incident not found")
     return _incident_to_dict(inc)
 
 
 @app.post("/api/incidents/{incident_id}/approve")
 async def api_approve(
+    request: Request,
     incident_id: str,
     action: str = Form(...),
     notes: str = Form(default=""),
@@ -3696,7 +3586,7 @@ async def api_approve(
 ):
     """Approve or reject an incident fix — called from both form POST and JS fetch."""
     inc = repo.get_by_id(incident_id)
-    if not inc:
+    if not inc or not _can_access_incident(request, inc):
         raise HTTPException(status_code=404, detail="Incident not found")
 
     action = action.strip().lower()
@@ -3748,6 +3638,7 @@ async def api_approve(
 
 @app.post("/incidents/{incident_id}/approve", response_class=RedirectResponse)
 async def form_approve(
+    request: Request,
     incident_id: str,
     action: str = Form(...),
     notes: str = Form(default=""),
@@ -3756,6 +3647,7 @@ async def form_approve(
 ):
     """Form-based approve/reject — redirects back to detail page."""
     await api_approve(
+        request=request,
         incident_id=incident_id,
         action=action,
         notes=notes,
@@ -3778,7 +3670,7 @@ async def api_trigger_workflow(
     overwrite the approval decision and reset the status to PENDING_APPROVAL.
     """
     inc = repo.get_by_id(incident_id)
-    if not inc:
+    if not inc or not _can_access_incident(request, inc):
         raise HTTPException(status_code=404, detail="Incident not found")
 
     # Guard: refuse to re-run the full workflow on approved / terminal incidents
@@ -3827,7 +3719,7 @@ async def api_continue_post_approval(
     Runs: patch generation → notifications → Jira → PR → finalize.
     """
     inc = repo.get_by_id(incident_id)
-    if not inc:
+    if not inc or not _can_access_incident(request, inc):
         raise HTTPException(status_code=404, detail="Incident not found")
 
     approval_status = getattr(inc, "approval_status", None)
@@ -3877,10 +3769,10 @@ async def api_export_audit_csv(
     selected_project = _get_selected_project(request, user)
     incidents = repo.get_all(limit=10000)
 
-    if selected_project:
-        project_scoped = [i for i in incidents if _incident_matches_project(i, selected_project)]
-        if project_scoped:
-            incidents = project_scoped
+    if not selected_project:
+        incidents = []
+    else:
+        incidents = [i for i in incidents if _incident_matches_project(i, selected_project)]
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -3988,8 +3880,15 @@ async def api_admin_apply_retention(request: Request):
 
 
 @app.delete("/api/incidents")
-async def api_clear_incidents(repo: IncidentRepository = Depends(get_repository)):
-    """Delete ALL incidents — use with caution (dev/debug only)."""
+async def api_clear_incidents(
+    request: Request,
+    repo: IncidentRepository = Depends(get_repository),
+):
+    """Delete ALL incidents — restricted to platform administrators."""
+    redir = _require_role(request, "admin")
+    if redir:
+        return JSONResponse({"error": "Admin role required"}, status_code=403)
+
     db = repo.db
     from storage.database import Incident as IncidentModel
 
@@ -4044,7 +3943,7 @@ async def api_bulk_approve(
     for incident_id in incident_ids:
         try:
             inc = repo.get_by_id(str(incident_id))
-            if not inc:
+            if not inc or not _can_access_incident(request, inc):
                 results.append({"incident_id": incident_id, "ok": False, "error": "Not found"})
                 continue
 
@@ -4083,6 +3982,7 @@ async def api_bulk_approve(
 
 @app.get("/api/analytics/trends")
 async def api_analytics_trends(
+    request: Request,
     days: int = Query(default=14, ge=1, le=90),
     repo: IncidentRepository = Depends(get_repository),
 ):
@@ -4096,14 +3996,52 @@ async def api_analytics_trends(
       "summary": {"total_incidents": 42, "by_severity": {...}, ...}
     }
     """
-    trends = repo.get_daily_trends(days=days)
-    mttr = repo.get_mttr_stats()
-    stats = repo.get_stats()
+    user = _get_current_user(request)
+    selected_project = _get_selected_project(request, user)
+    incidents = [
+        incident for incident in repo.get_all(limit=10000)
+        if selected_project and _incident_matches_project(incident, selected_project)
+    ]
+
+    cutoff = datetime.utcnow().date().toordinal() - days + 1
+    trend_by_date: dict[str, list[Any]] = {}
+    completed_durations: list[float] = []
+
+    for incident in incidents:
+        created_at = getattr(incident, "created_at", None)
+        if not isinstance(created_at, datetime) or created_at.date().toordinal() < cutoff:
+            continue
+        date_key = created_at.date().isoformat()
+        trend_by_date.setdefault(date_key, []).append(incident)
+
+        completed_at = getattr(incident, "completed_at", None)
+        if isinstance(completed_at, datetime) and completed_at >= created_at:
+            completed_durations.append((completed_at - created_at).total_seconds() / 60)
+
+    trends = [
+        {
+            "date": date_key,
+            "total": len(items),
+            "approved": sum(1 for item in items if getattr(item, "approval_status", "") == "approved"),
+            "rejected": sum(1 for item in items if getattr(item, "approval_status", "") == "rejected"),
+            "acceptance_rate": round(
+                100 * sum(1 for item in items if getattr(item, "approval_status", "") == "approved")
+                / max(1, sum(1 for item in items if getattr(item, "approval_status", "") in {"approved", "rejected"})),
+                1,
+            ),
+        }
+        for date_key, items in sorted(trend_by_date.items())
+    ]
+    scoped_stats = _compute_stats(incidents)
 
     return JSONResponse({
         "trends": trends,
-        "mttr": mttr,
-        "summary": stats,
+        "mttr": {
+            "mttr_minutes": round(sum(completed_durations) / len(completed_durations), 1)
+            if completed_durations else None,
+            "sample_size": len(completed_durations),
+        },
+        "summary": scoped_stats,
         "days": days,
     })
 
@@ -4130,7 +4068,7 @@ async def api_regenerate_fix(
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
     inc = repo.get_by_id(incident_id)
-    if not inc:
+    if not inc or not _can_access_incident(request, inc):
         raise HTTPException(status_code=404, detail="Incident not found")
 
     try:
@@ -4256,7 +4194,7 @@ async def api_get_comments(
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
     inc = repo.get_by_id(incident_id)
-    if not inc:
+    if not inc or not _can_access_incident(request, inc):
         raise HTTPException(status_code=404, detail="Incident not found")
 
     comments = repo.get_comments(incident_id)
@@ -4286,7 +4224,7 @@ async def api_add_comment(
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
     inc = repo.get_by_id(incident_id)
-    if not inc:
+    if not inc or not _can_access_incident(request, inc):
         raise HTTPException(status_code=404, detail="Incident not found")
 
     try:
@@ -4333,6 +4271,10 @@ async def api_delete_comment(
     if redir:
         return JSONResponse({"error": "Unauthorized"}, status_code=403)
 
+    inc = repo.get_by_id(incident_id)
+    if not inc or not _can_access_incident(request, inc):
+        raise HTTPException(status_code=404, detail="Incident not found")
+
     ok = repo.delete_comment(comment_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Comment not found")
@@ -4346,7 +4288,11 @@ async def api_delete_comment(
 
 @app.get("/events")
 async def sse_stream(request: Request):
-    """SSE endpoint — streams incident updates to the browser."""
+    """SSE endpoint — streams incident updates to authenticated browsers."""
+    auth_redirect = _require_auth(request)
+    if auth_redirect:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
     queue: asyncio.Queue = asyncio.Queue(maxsize=50)
     _sse_subscribers.append(queue)
 
@@ -4603,7 +4549,7 @@ async def audit_page(request: Request):
 
 @app.get("/admin/projects", response_class=HTMLResponse)
 async def admin_projects_page(request: Request):
-    auth_redirect = _require_auth(request)
+    auth_redirect = _require_role(request, "admin")
     if auth_redirect:
         return auth_redirect
     return templates.TemplateResponse(
@@ -4615,7 +4561,7 @@ async def admin_projects_page(request: Request):
 
 @app.get("/admin/teams", response_class=HTMLResponse)
 async def admin_teams_page(request: Request):
-    auth_redirect = _require_auth(request)
+    auth_redirect = _require_role(request, "admin")
     if auth_redirect:
         return auth_redirect
     return templates.TemplateResponse(
@@ -4631,7 +4577,7 @@ async def admin_teams_page(request: Request):
 
 @app.get("/admin/customers", response_class=HTMLResponse)
 async def admin_customers_page(request: Request):
-    auth_redirect = _require_auth(request)
+    auth_redirect = _require_role(request, "admin")
     if auth_redirect:
         return auth_redirect
     customers = list_customers()
@@ -4647,7 +4593,7 @@ async def admin_customers_page(request: Request):
 
 @app.get("/admin/customers/{customer_id}", response_class=HTMLResponse)
 async def admin_customer_detail_page(request: Request, customer_id: str):
-    auth_redirect = _require_auth(request)
+    auth_redirect = _require_role(request, "admin")
     if auth_redirect:
         return auth_redirect
     customer = get_customer(customer_id)
@@ -4777,22 +4723,33 @@ async def api_update_integration(customer_id: str, integration_name: str, reques
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/sidebar/projects")
-async def api_sidebar_projects():
-    """Return all projects for the sidebar project selector."""
-    if not _AUTH_AVAILABLE:
+async def api_sidebar_projects(request: Request):
+    """Return only projects available to the authenticated sidebar user."""
+    user = _get_current_user(request)
+    if not (_AUTH_AVAILABLE and user):
         return []
     try:
-        projects = list_projects()
+        projects = _get_accessible_projects_with_fallback(user)
         return [{"id": p["id"], "name": p["name"]} for p in projects]
     except Exception:
         return []
 
 
 @app.get("/api/sidebar/apps")
-async def api_sidebar_apps(repo: IncidentRepository = Depends(get_repository)):
-    """Return distinct application names from incidents for the app selector."""
+async def api_sidebar_apps(
+    request: Request,
+    repo: IncidentRepository = Depends(get_repository),
+):
+    """Return project-scoped application names for the app selector."""
+    user = _get_current_user(request)
+    selected_project = _get_selected_project(request, user)
+    if not selected_project:
+        return []
     try:
-        incidents = repo.get_all(limit=1000)
+        incidents = [
+            incident for incident in repo.get_all(limit=1000)
+            if _incident_matches_project(incident, selected_project)
+        ]
         apps = sorted({str(i.app_name) for i in incidents if getattr(i, "app_name", None) is not None and str(i.app_name).strip()})
         return apps
     except Exception:
@@ -4828,7 +4785,7 @@ async def api_switch_project(request: Request):
             return JSONResponse({"success": False, "message": "Access denied"}, status_code=403)
 
     resp = JSONResponse({"success": True, "project_id": project_id, "project_name": project.get("name", project_id)})
-    resp.set_cookie("active_project", project_id, httponly=True, max_age=86400 * 7)
+    resp.set_cookie("active_project", project_id, **_session_cookie_options())
     return resp
 
 
@@ -4848,7 +4805,7 @@ async def api_switch_app(request: Request):
         return JSONResponse({"success": False, "message": "app_id is required"}, status_code=400)
 
     resp = JSONResponse({"success": True, "app_id": app_id, "app_name": app_id})
-    resp.set_cookie("active_app", app_id, httponly=True, max_age=86400 * 7)
+    resp.set_cookie("active_app", app_id, **_session_cookie_options())
     return resp
 
 

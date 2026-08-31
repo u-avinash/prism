@@ -289,7 +289,11 @@ def _resolve_project_id_for_incident(
         ]
         if len(org_candidates) == 1:
             resolved_id = org_candidates[0].get("id")
-            logger.info(
+            # This resolution runs once per incident row when the UI filters/lists
+            # incidents, so it can fire dozens of times per page load. Use DEBUG
+            # so normal operation doesn't flood the console; nothing actionable
+            # happens here that operators need to see at INFO level.
+            logger.debug(
                 "Resolved project_id=%s for app_name='%s' through configured GitHub organization.",
                 resolved_id,
                 app_name,
@@ -595,10 +599,42 @@ def _update_incident_status(incident_id: str, status: str, current_node: str) ->
 
 
 # ---------------------------------------------------------------------------
+# Workflow execution leases
+# ---------------------------------------------------------------------------
+
+def _acquire_workflow_lease(incident_id: str) -> Optional[str]:
+    """Acquire the persistent single-run lease for an incident."""
+    from storage.database import get_session
+    from storage.incident_repository import IncidentRepository
+
+    with get_session() as session:
+        return IncidentRepository(session).acquire_workflow_lease(incident_id)
+
+
+def _release_workflow_lease(incident_id: str, token: str) -> None:
+    """Best-effort release of a lease owned by the current runner."""
+    try:
+        from storage.database import get_session
+        from storage.incident_repository import IncidentRepository
+
+        with get_session() as session:
+            IncidentRepository(session).release_workflow_lease(incident_id, token)
+    except Exception as exc:
+        logger.warning(
+            "[Workflow] Failed to release execution lease for incident %s: %s",
+            incident_id,
+            exc,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Post-approval workflow continuation (called from API after human approval)
 # ---------------------------------------------------------------------------
 
-def run_post_approval_workflow(incident_id: str, project_id: Optional[str] = None) -> AgentState:
+def _run_post_approval_workflow_unlocked(
+    incident_id: str,
+    project_id: Optional[str] = None,
+) -> AgentState:
     """
     Resume the workflow for an approved incident running only post-approval steps:
       1. Patch generation (skipped if patch was already generated pre-approval)
@@ -633,6 +669,7 @@ def run_post_approval_workflow(incident_id: str, project_id: Optional[str] = Non
 
         # Load ALL attributes inside the session to avoid DetachedInstanceError
         _approval_status = getattr(incident, "approval_status", None)
+        _stored_project_id = getattr(incident, "project_id", None)
         _app_name = str(incident.app_name or "")
         _environment = str(incident.environment or "")
         _error_title = str(incident.error_title or "")
@@ -673,7 +710,7 @@ def run_post_approval_workflow(incident_id: str, project_id: Optional[str] = Non
         )
 
     resolved_project_id = _resolve_project_id_for_incident(
-        project_id,
+        project_id or _stored_project_id,
         _app_name,
         _environment,
     )
@@ -834,6 +871,27 @@ def run_post_approval_workflow(incident_id: str, project_id: Optional[str] = Non
 
     logger.info("[Post-Approval] Workflow complete for incident %s", incident_id)
     return state
+
+
+def run_post_approval_workflow(
+    incident_id: str,
+    project_id: Optional[str] = None,
+) -> AgentState:
+    """Run post-approval processing once for an incident.
+
+    Duplicate queue deliveries leave the active run untouched. A stale token is
+    recoverable through the repository's lease timeout.
+    """
+    token = _acquire_workflow_lease(incident_id)
+    if not token:
+        raise ValueError(
+            f"Workflow execution is already active for incident {incident_id}."
+        )
+
+    try:
+        return _run_post_approval_workflow_unlocked(incident_id, project_id)
+    finally:
+        _release_workflow_lease(incident_id, token)
 
 
 # ---------------------------------------------------------------------------
@@ -1070,6 +1128,17 @@ async def run_incident_workflow(
         project_id=resolved_project_id,
     )
 
+    lease_token = _acquire_workflow_lease(incident_id)
+    if not lease_token:
+        logger.info(
+            "[Workflow] Duplicate execution request ignored for incident %s",
+            incident_id,
+        )
+        initial_state["messages"] = [
+            f"ℹ️ Workflow execution already active for incident {incident_id}"
+        ]
+        return initial_state
+
     workflow_app = create_agent_workflow()
 
     try:
@@ -1081,6 +1150,8 @@ async def run_incident_workflow(
         initial_state["error_message"] = f"Workflow execution failed: {exc}"
         initial_state["messages"] = [f"❌ Workflow failed: {exc}"]
         return initial_state
+    finally:
+        _release_workflow_lease(incident_id, lease_token)
 
 
 def run_incident_workflow_sync(
@@ -1165,7 +1236,7 @@ def run_workflow_for_incident(incident_id: str, project_id: Optional[str] = None
             )
 
         resolved_project_id = _resolve_project_id_for_incident(
-            project_id,
+            project_id or getattr(incident, "project_id", None),
             str(incident.app_name or ""),
             str(incident.environment or ""),
         )

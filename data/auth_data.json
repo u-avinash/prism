@@ -4,7 +4,7 @@
       "id": "USR-ADMIN",
       "username": "admin",
       "email": "admin@prism.local",
-      "password_hash": "9a4aabf0e5cf71cae2cea646613ce7e2a5919fa758e56819704be25a3a2c1f0b",
+      "password_hash": "pbkdf2_sha256$310000$75694fbce69d156b5ae05df349aaf4c4$8e0bcb1395a95b3dcf8d51aa644427177536d6d1c2285f2723a9abca49b8e964",
       "role": "admin",
       "features": [
         "dashboard",
@@ -25,7 +25,7 @@
       "id": "USR-C24C60E6",
       "username": "uavinash",
       "email": "avinash.upadhyayula@nttdata.com",
-      "password_hash": "9a4aabf0e5cf71cae2cea646613ce7e2a5919fa758e56819704be25a3a2c1f0b",
+      "password_hash": "pbkdf2_sha256$310000$5d1788fb611588a7bafbc1fc0732a646$cb49d4c706af49e8da9914ee46b870e434259c4faba9e6037eeac30bfac29dd2",
       "role": "team_admin",
       "features": [
         "dashboard",
@@ -46,7 +46,7 @@
       "id": "USR-E47E6F64",
       "username": "hss_user1",
       "email": "uavinash.csit@gmail.com",
-      "password_hash": "18c3065fc953cc53876febb95e084bd2f1690622b28d1b9cae6a00ae8b5739b9",
+      "password_hash": "pbkdf2_sha256$310000$70d34d08f4e2b255e888093897ff868f$104fbefa216fd7a638e3bbf611e77e860e13084f6fcab3d2a790546a157cdd91",
       "role": "user",
       "features": [
         "dashboard",
@@ -99,6 +99,34 @@
       "team_admin_email": "avinash.upadhyayula@nttdata.com",
       "created_at": "2026-06-12T07:09:30.161009",
       "is_active": true
+    },
+    {
+      "id": "PRJ-0DFB70FD",
+      "name": "Microsoft",
+      "description": "",
+      "repo_url": "",
+      "app_names": [],
+      "stack": "C#/.NET",
+      "environment": "production",
+      "owner_id": "USR-ADMIN",
+      "team_admin_id": "USR-C24C60E6",
+      "team_admin_email": "avinash.upadhyayula@nttdata.com",
+      "created_at": "2026-08-04T04:04:46.695486+00:00",
+      "is_active": true
+    },
+    {
+      "id": "PRJ-57440D89",
+      "name": "Project 1",
+      "description": "",
+      "repo_url": "",
+      "app_names": [],
+      "stack": "PHP, Python",
+      "environment": "production",
+      "owner_id": "USR-ADMIN",
+      "team_admin_id": "USR-C24C60E6",
+      "team_admin_email": "avinash.upadhyayula@nttdata.com",
+      "created_at": "2026-08-04T04:08:57.394893+00:00",
+      "is_active": true
     }
   ],
   "teams": [],
@@ -121,6 +149,18 @@
       "user_id": "USR-BBD1D9DE",
       "project_id": "PRJ-04A0A733",
       "assigned_at": "2026-06-12T07:11:20.692411"
+    },
+    {
+      "id": "ASN-DFC5ABF2",
+      "user_id": "USR-C24C60E6",
+      "project_id": "PRJ-0DFB70FD",
+      "assigned_at": "2026-08-04T04:04:47.020863+00:00"
+    },
+    {
+      "id": "ASN-AFC5F109",
+      "user_id": "USR-C24C60E6",
+      "project_id": "PRJ-57440D89",
+      "assigned_at": "2026-08-04T04:08:57.853518+00:00"
     }
   ],
   "project_configs": []

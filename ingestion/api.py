@@ -42,8 +42,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _persist_telemetry_logs(payload: dict) -> Tuple[TelemetryLogRepository, List[TelemetryLogCreate]]:
-    """Parse and persist telemetry logs from an OTLP payload."""
+def _persist_telemetry_logs(
+    payload: dict,
+    project_id: Optional[str] = None,
+) -> Tuple[TelemetryLogRepository, List[TelemetryLogCreate]]:
+    """Parse and persist telemetry logs within an optional tenant boundary."""
     parser = OTLPParser()
     db = next(get_db())
     telemetry_repo = TelemetryLogRepository(db)
@@ -51,7 +54,7 @@ def _persist_telemetry_logs(payload: dict) -> Tuple[TelemetryLogRepository, List
     persisted_logs: List[TelemetryLogCreate] = []
 
     for telemetry_log in telemetry_logs:
-        telemetry_repo.create(telemetry_log)
+        telemetry_repo.create(telemetry_log, project_id=project_id)
         persisted_logs.append(telemetry_log)
 
     return telemetry_repo, persisted_logs
@@ -62,6 +65,7 @@ def _link_incident_to_telemetry_log(
     telemetry_logs: List[TelemetryLogCreate],
     incident_data: IncidentCreate,
     incident_id: str,
+    project_id: Optional[str] = None,
 ) -> None:
     """Link a created incident to the matching stored telemetry log."""
     try:
@@ -84,6 +88,7 @@ def _link_incident_to_telemetry_log(
             environment=telemetry_log.environment,
             message=telemetry_log.message,
             trace_id=telemetry_log.trace_id,
+            project_id=project_id,
         )
         if stored_log:
             telemetry_repo.mark_incident_created(stored_log.log_id, incident_id)
@@ -150,6 +155,7 @@ def _auto_group_incident(
     error_title: str,
     app_name: str,
     fingerprint: str,
+    project_id: Optional[str] = None,
     lookback_hours: int = 48,
 ) -> None:
     """
@@ -172,6 +178,7 @@ def _auto_group_incident(
             .filter(
                 and_(
                     Incident.app_name == app_name,
+                    Incident.project_id == project_id if project_id else Incident.project_id.is_(None),
                     Incident.error_title.like(f"{group_prefix}%"),
                     Incident.created_at >= cutoff,
                     Incident.incident_id != new_incident.incident_id,
@@ -225,6 +232,7 @@ def _process_single_otlp_incident(
     repo,
     db,
     background_tasks: BackgroundTasks,
+    project_id: Optional[str] = None,
     apply_grouping: bool = True,
     apply_recurring_check: bool = True,
 ) -> dict:
@@ -252,7 +260,7 @@ def _process_single_otlp_incident(
         )
 
         # Deduplication check
-        existing = repo.get_by_fingerprint(fingerprint)
+        existing = repo.get_by_fingerprint(fingerprint, project_id=project_id)
         if existing:
             existing.occurrence_count += 1
             existing.last_occurrence_at = datetime.utcnow()
@@ -281,6 +289,7 @@ def _process_single_otlp_incident(
 
         new_incident = repo.create(
             incident=incident_data,
+            project_id=project_id,
             error_fingerprint=fingerprint,
             severity=severity,
         )
@@ -290,10 +299,12 @@ def _process_single_otlp_incident(
         if apply_grouping:
             _auto_group_incident(repo, db, new_incident,
                                  incident_data.error_title,
-                                 incident_data.app_name, fingerprint)
+                                 incident_data.app_name, fingerprint, project_id=project_id)
         if apply_recurring_check:
             is_recurring = _check_recurring_pattern(
-                incident_data.app_name, incident_data.error_title
+                incident_data.app_name,
+                incident_data.error_title,
+                project_id=project_id,
             )
             if is_recurring:
                 logger.warning(
@@ -312,7 +323,11 @@ def _process_single_otlp_incident(
                 current_workflow_node="assess_severity",
             )
             logger.info("Triggering workflow for OTLP incident %s", new_incident.incident_id)
-            background_tasks.add_task(process_incident_workflow, new_incident.incident_id)
+            background_tasks.add_task(
+                process_incident_workflow,
+                new_incident.incident_id,
+                project_id,
+            )
 
         return {
             "status": "created",
@@ -339,6 +354,7 @@ def _process_single_otlp_incident(
 def _check_recurring_pattern(
     app_name: str,
     error_title: str,
+    project_id: Optional[str] = None,
     threshold: int = 3,
     window_days: int = 7,
 ) -> bool:
@@ -357,6 +373,7 @@ def _check_recurring_pattern(
                 db.query(Incident)
                 .filter(
                     Incident.app_name == app_name,
+                    Incident.project_id == project_id if project_id else Incident.project_id.is_(None),
                     Incident.error_title.like(f"{group_prefix}%"),
                     Incident.created_at >= cutoff,
                 )
@@ -463,7 +480,10 @@ async def record_request_middleware(request: Request, call_next):
             pass
 
 
-async def process_incident_workflow(incident_id: str):
+async def process_incident_workflow(
+    incident_id: str,
+    project_id: Optional[str] = None,
+):
     """
     Background task to process incident through agent workflow.
 
@@ -490,7 +510,7 @@ async def process_incident_workflow(incident_id: str):
         # Resolve the project this incident belongs to so the workflow can load
         # the correct LLM / integration configs even when the app name doesn't
         # directly match a project name.
-        project_id = _resolve_project_id_for_incident(
+        project_id = project_id or getattr(incident, "project_id", None) or _resolve_project_id_for_incident(
             None,
             incident.app_name,
             incident.environment,
@@ -823,7 +843,7 @@ async def ingest_ci_cd_events(
         db = next(get_db())
         repo = IncidentRepository(db)
 
-        existing = repo.get_by_fingerprint(fingerprint)
+        existing = repo.get_by_fingerprint(fingerprint, project_id=project_id)
         if existing:
             existing.occurrence_count += 1
             existing.last_occurrence_at = datetime.utcnow()
@@ -831,12 +851,24 @@ async def ingest_ci_cd_events(
             return {"status": "duplicate", "incident_id": existing.incident_id,
                     "occurrence_count": existing.occurrence_count}
 
-        new_incident = repo.create(incident=incident_data, error_fingerprint=fingerprint, severity=severity)
-        _auto_group_incident(repo, db, new_incident, incident_data.error_title, app_name, fingerprint)
+        new_incident = repo.create(
+            incident=incident_data,
+            project_id=project_id,
+            error_fingerprint=fingerprint,
+            severity=severity,
+        )
+        _auto_group_incident(
+            repo, db, new_incident, incident_data.error_title, app_name,
+            fingerprint, project_id=project_id,
+        )
 
         if settings.auto_fix_enabled:
             repo.update(new_incident.incident_id, status=IncidentStatus.ANALYZING.value, current_workflow_node="assess_severity")
-            background_tasks.add_task(process_incident_workflow, new_incident.incident_id)
+            background_tasks.add_task(
+                process_incident_workflow,
+                new_incident.incident_id,
+                project_id,
+            )
 
         return {
             "status": "created",
@@ -861,8 +893,8 @@ async def ingest_v1_logs(payload: dict, background_tasks: BackgroundTasks, reque
     Supports optional per-project API key authentication via:
       Authorization: Bearer <api_key>
     """
-    # Optional API key auth — resolves project_id if a valid key is provided
-    _validate_api_key(request, authorization)
+    # Optional API key auth — resolved ownership is persisted on every record.
+    project_id = _validate_api_key(request, authorization)
 
     try:
         resource_count = len(payload.get("resourceLogs", []))
@@ -870,7 +902,10 @@ async def ingest_v1_logs(payload: dict, background_tasks: BackgroundTasks, reque
         logger.debug("Full OTLP payload: %s", json.dumps(payload, indent=2))
 
         parser = OTLPParser()
-        telemetry_repo, telemetry_logs = _persist_telemetry_logs(payload)
+        telemetry_repo, telemetry_logs = _persist_telemetry_logs(
+            payload,
+            project_id=project_id,
+        )
 
         incidents = parser.parse_otlp_json(payload)
         
@@ -890,6 +925,7 @@ async def ingest_v1_logs(payload: dict, background_tasks: BackgroundTasks, reque
         for incident_data in incidents:
             result = _process_single_otlp_incident(
                 incident_data, repo, db, background_tasks,
+                project_id=project_id,
                 apply_grouping=True, apply_recurring_check=True,
             )
             if result["status"] == "duplicate":
@@ -903,6 +939,7 @@ async def ingest_v1_logs(payload: dict, background_tasks: BackgroundTasks, reque
                     telemetry_logs=telemetry_logs,
                     incident_data=incident_data,
                     incident_id=result["incident_id"],
+                    project_id=project_id,
                 )
                 created_incidents.append({
                     "incident_id": result["incident_id"],
@@ -941,6 +978,15 @@ async def ingest_v1_logs(payload: dict, background_tasks: BackgroundTasks, reque
         raise HTTPException(status_code=500, detail=f"Failed to ingest OTLP logs: {str(e)}")
 
 
+# NOTE (reserved for future use): This endpoint is NOT currently referenced by
+# the Prism UI or any other internal component. It only receives OTLP/JSON
+# traces pushed by an external OpenTelemetry Collector (see
+# config/otel-collector-config.yaml -> traces_endpoint) and is exercised
+# directly by tools/tests/test_otlp_integration.py. The UI's /traces page
+# (ui/server.py::traces_page, ui/templates/traces.html) renders its own
+# sample data and does NOT call this endpoint. Retained intentionally so
+# trace ingestion/correlation can be built out in a future iteration —
+# do not remove.
 @app.post("/v1/traces")
 async def ingest_v1_traces(payload: dict):
     """
@@ -1001,6 +1047,15 @@ async def ingest_v1_traces(payload: dict):
         raise HTTPException(status_code=500, detail=f"Failed to ingest OTLP traces: {str(e)}")
 
 
+# NOTE (reserved for future use): This endpoint is NOT currently referenced by
+# the Prism UI or any other internal component. It only receives OTLP/JSON
+# metrics pushed by an external OpenTelemetry Collector (see
+# config/otel-collector-config.yaml -> metrics_endpoint) and is exercised
+# directly by tools/tests/test_otlp_integration.py. The UI's /metrics page
+# (ui/server.py::metrics_page, ui/templates/metrics.html) renders its own
+# sample data and does NOT call this endpoint. Retained intentionally so
+# metrics storage/alerting can be built out in a future iteration —
+# do not remove.
 @app.post("/v1/metrics")
 async def ingest_v1_metrics(payload: dict):
     """

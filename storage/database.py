@@ -37,6 +37,7 @@ class TelemetryLog(Base):
     log_id = Column(String(4), primary_key=True, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     observed_timestamp = Column(DateTime, nullable=True)
+    project_id = Column(String(64), nullable=True, index=True)
     app_name = Column(String(255), nullable=False, index=True)
     environment = Column(String(50), nullable=False, index=True)
     deployment_type = Column(String(50), nullable=True, index=True)
@@ -66,6 +67,9 @@ class Incident(Base):
     # Primary key (4-character alphanumeric ID, e.g., A7CB)
     incident_id = Column(String(4), primary_key=True, nullable=False)
 
+    # Tenant ownership. Legacy rows may remain NULL until explicitly backfilled.
+    project_id = Column(String(64), nullable=True, index=True)
+
     # Basic info
     app_name = Column(String(255), nullable=False, index=True)
     environment = Column(String(50), nullable=False, index=True)
@@ -89,6 +93,9 @@ class Incident(Base):
     current_workflow_node = Column(String(100), nullable=True)
     workflow_completed_steps = Column(JSON, nullable=True)
     workflow_progress_pct = Column(Float, nullable=True)
+    # Active-run lease used to prevent duplicate asynchronous workflow execution.
+    workflow_run_token = Column(String(64), nullable=True, index=True)
+    workflow_started_at = Column(DateTime, nullable=True)
 
     # RCA
     rca_text = Column(Text, nullable=True)
@@ -281,6 +288,23 @@ def init_database():
             )
             logger.info("Added repo_mappings column to project_integration_configs")
 
+        # --- telemetry_logs migrations ---
+        telemetry_columns = [
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(telemetry_logs)"
+            ).fetchall()
+        ]
+        if "project_id" not in telemetry_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE telemetry_logs ADD COLUMN project_id VARCHAR(64)"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_telemetry_logs_project_id "
+                "ON telemetry_logs (project_id)"
+            )
+            logger.info("Added project_id column to telemetry_logs")
+
         # --- incidents migrations ---
         inc_columns = [
             row[1]
@@ -290,6 +314,9 @@ def init_database():
         ]
 
         new_incident_columns = [
+            ("project_id",             "VARCHAR(64)"),
+            ("workflow_run_token",     "VARCHAR(64)"),
+            ("workflow_started_at",    "DATETIME"),
             ("source_technology",      "VARCHAR(50)"),
             ("detected_framework",     "VARCHAR(100)"),
             ("incident_group_id",      "VARCHAR(4)"),
@@ -307,5 +334,18 @@ def init_database():
                     f"ALTER TABLE incidents ADD COLUMN {col_name} {col_def}"
                 )
                 logger.info("Added %s column to incidents", col_name)
+
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_incidents_workflow_run_token "
+            "ON incidents (workflow_run_token)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_incidents_project_id "
+            "ON incidents (project_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_incidents_project_fingerprint "
+            "ON incidents (project_id, error_fingerprint)"
+        )
 
     logger.info("Database initialized successfully")

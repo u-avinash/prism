@@ -54,9 +54,7 @@
         <button class="team-tab-btn" onclick="showTab('tab-llm')" id="tabBtn-llm">🤖 LLM</button>
         <button class="team-tab-btn" onclick="showTab('tab-jira')" id="tabBtn-jira">📋 Jira</button>
         <button class="team-tab-btn" onclick="showTab('tab-github')" id="tabBtn-github">🐙 GitHub</button>
-        <button class="team-tab-btn" onclick="showTab('tab-anypoint')" id="tabBtn-anypoint">☁ Anypoint</button>
         <button class="team-tab-btn" onclick="showTab('tab-notify')" id="tabBtn-notify">🔔 Notifications</button>
-        <button class="team-tab-btn" onclick="showTab('tab-repos')" id="tabBtn-repos">📂 Source Code</button>
       </div>
     </div>
   </aside>
@@ -123,22 +121,6 @@
             </div>
           </div>
 
-          <div class="team-section-card">
-            <div class="team-section-card-header">
-              <div class="table-primary">Feature Access</div>
-              <div class="table-secondary">All selected gives access to the full visible workspace.</div>
-            </div>
-            <div class="feature-grid feature-grid--member">
-              {% set member_features = all_features if all_features else ['incidents', 'dashboard', 'log_viewer', 'observability', 'app_health', 'settings', 'reports'] %}
-              {% for fkey in member_features %}
-              <label class="feature-card">
-                <input type="checkbox" class="mem-feature-cb" value="{{ fkey }}" checked />
-                <span>{{ fkey | replace('_', ' ') | title }}</span>
-              </label>
-              {% endfor %}
-            </div>
-          </div>
-
           <div class="admin-form-actions">
             <button class="btn btn-primary" onclick="submitMemberAction()">Save Member Assignment</button>
           </div>
@@ -159,7 +141,6 @@
               <thead>
                 <tr>
                   <th>User</th>
-                  <th>Access</th>
                   <th class="admin-actions-col">Actions</th>
                 </tr>
               </thead>
@@ -171,22 +152,7 @@
                     <div class="table-secondary">{{ m.email or 'Email not available' }}</div>
                   </td>
                   <td>
-                    {% if m.feature_access %}
-                      <div class="table-primary table-primary--sm">{{ m.feature_access | length }} feature(s)</div>
-                      <div class="table-secondary">Restricted access</div>
-                    {% else %}
-                      <div class="table-primary table-primary--sm">Full access</div>
-                      <div class="table-secondary">No restrictions</div>
-                    {% endif %}
-                  </td>
-                  <td>
                     <div class="table-actions">
-                      <button class="btn btn-ghost btn-sm edit-member-access-btn"
-                        data-uid="{{ m.user_id or m.id }}"
-                        data-uname="{{ m.username | e }}"
-                        data-access="{{ m.feature_access | join(',') if m.feature_access else '' }}">
-                        ✏ Edit Access
-                      </button>
                       {% if selected_project %}
                       <button class="btn btn-ghost btn-sm remove-member-btn"
                         data-uid="{{ m.user_id or m.id }}"
@@ -216,8 +182,8 @@
       <div class="card">
         <div class="card-header admin-card-header">
           <div>
-            <h2 class="card-title">Project Runtime Configuration</h2>
-            <p class="card-subtitle">Manage project-specific runtime overrides directly in Project Configuration.</p>
+            <h2 class="card-title">Project Details</h2>
+            <p class="card-subtitle">Update the description shown to your team for this project.</p>
           </div>
         </div>
         <div class="card-body">
@@ -230,54 +196,12 @@
               placeholder="Add a short description for this project"
             >{{ selected_project.description if selected_project and selected_project.description else '' }}</textarea>
           </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="runtimeOtlpCollectorPort">OpenTelemetry Collector Port</label>
-              <input
-                class="form-input"
-                id="runtimeOtlpCollectorPort"
-                type="number"
-                min="1"
-                max="65535"
-                value="{{ integration_config.get('runtime', {}).get('otlp_collector_port', settings.otlp_collector_port) }}"
-              />
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="runtimeDatabasePath">Database Path</label>
-              <input
-                class="form-input"
-                id="runtimeDatabasePath"
-                type="text"
-                value="{{ integration_config.get('runtime', {}).get('database_path', settings.database_path) }}"
-              />
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="runtimePdfOutputDir">PDF Output Directory</label>
-              <input
-                class="form-input"
-                id="runtimePdfOutputDir"
-                type="text"
-                value="{{ integration_config.get('runtime', {}).get('pdf_output_dir', settings.pdf_output_dir) }}"
-              />
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="runtimePatchOutputDir">Patch Output Directory</label>
-              <input
-                class="form-input"
-                id="runtimePatchOutputDir"
-                type="text"
-                value="{{ integration_config.get('runtime', {}).get('patch_output_dir', settings.patch_output_dir) }}"
-              />
-            </div>
-          </div>
           <div class="integration-verification-note" id="runtimeConfigState">
-            Status: {% if integration_config.get('runtime') %}Saved configuration{% else %}Ready to save{% endif %}
+            Status: Ready to save
           </div>
           <div class="admin-form-actions admin-form-actions--split">
-            <div class="integration-verification-note">Project configuration is editable directly on this page.</div>
-            <button class="btn btn-primary" id="saveBtn-runtime" onclick="saveRuntimeConfig()">💾 Save Project Configuration</button>
+            <div class="integration-verification-note">Infrastructure settings (database path, output directories, OTLP port) are shared across all projects and configured once via environment variables — see the README.</div>
+            <button class="btn btn-primary" id="saveBtn-runtime" onclick="saveRuntimeConfig()">💾 Save Description</button>
           </div>
         </div>
       </div>
@@ -435,42 +359,6 @@
       </div>
     </div>
 
-    <div id="tab-anypoint" class="tab-panel" style="display:none;">
-      <div class="card">
-        <div class="card-header admin-card-header">
-          <div>
-            <h2 class="card-title">Anypoint Platform Configuration</h2>
-            <p class="card-subtitle">Environment selection has been removed; verify credentials before saving.</p>
-          </div>
-        </div>
-        <div class="card-body">
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="anypointClientId">Client ID *</label>
-              <input class="form-input" id="anypointClientId" type="text" placeholder="Anypoint Client ID" value="{{ integration_config.get('anypoint', {}).get('client_id', '') }}" />
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="anypointClientSecret">Client Secret *</label>
-              <input class="form-input" id="anypointClientSecret" type="password" placeholder="Anypoint Client Secret" />
-            </div>
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="anypointOrgId">Organisation ID</label>
-            <input class="form-input" id="anypointOrgId" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="{{ integration_config.get('anypoint', {}).get('org_id', '') }}" />
-          </div>
-          <div class="integration-verification-note" id="verifyState-anypoint">Status: Not verified</div>
-          <div class="admin-form-actions admin-form-actions--split">
-            <button class="btn btn-ghost" id="verifyBtn-anypoint" onclick="testIntegration('anypoint')">🔌 Verify</button>
-            <div style="display:flex; gap:0.75rem;">
-              <button class="btn btn-ghost" id="editBtn-anypoint" onclick="toggleIntegrationEdit('anypoint')">✏ Edit</button>
-              <button class="btn btn-ghost" onclick="deleteIntegration('anypoint')">🗑 Delete</button>
-              <button class="btn btn-primary" id="saveBtn-anypoint" onclick="saveIntegration('anypoint')" disabled>💾 Save</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <div id="tab-notify" class="tab-panel" style="display:none;">
       <div class="card" style="margin-bottom:1.5rem;">
         <div class="card-header admin-card-header">
@@ -525,76 +413,9 @@
       </div>
     </div><!-- END tab-notify -->
 
-    <div id="tab-repos" class="tab-panel" style="display:none;">
-      <div class="card">
-        <div class="card-header admin-card-header">
-          <div>
-            <h2 class="card-title">Source Code Configuration</h2>
-            <p class="card-subtitle">
-              Set the GitHub organisation and default branch to use for source code fetching.
-              Repository names are resolved <strong>automatically</strong> from the application name
-              in the incoming telemetry log — no manual app-to-repo mapping is needed.
-            </p>
-          </div>
-        </div>
-        <div class="card-body">
-          <div class="integration-verification-note" style="margin-bottom:1rem;">
-            ℹ️ When an incident arrives, Prism reads the <strong>app name</strong> from the log,
-            searches the configured GitHub organisation for a matching repository, and fetches the
-            source file automatically. Only the organisation name and the branch to read from are
-            required here.
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="srcOrg">GitHub Organisation / Owner *</label>
-              <input class="form-input" id="srcOrg" type="text"
-                placeholder="my-org"
-                value="{{ integration_config.get('github', {}).get('org', '') }}" />
-              <div class="form-hint">The GitHub organisation or user account that owns the application repositories (e.g. <code>avinash-ai-langchain</code>).</div>
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="srcBranch">Default Branch</label>
-              <input class="form-input" id="srcBranch" type="text"
-                placeholder="main"
-                value="{{ integration_config.get('github', {}).get('default_branch', 'main') }}" />
-              <div class="form-hint">Branch to read source files from (e.g. <code>main</code> or <code>develop</code>).</div>
-            </div>
-          </div>
-          <div class="admin-form-actions" style="margin-top:1rem;">
-            <button class="btn btn-primary" onclick="saveSourceCodeConfig()">💾 Save Source Code Config</button>
-          </div>
-          <div id="sourceCodeConfigStatus" style="margin-top:0.5rem;font-size:13px;color:var(--text-muted,#6b7280);"></div>
-        </div>
-      </div>
-    </div>
-
   </section>
 </div>
 
-<div id="memberAccessModal" class="modal-overlay" hidden>
-  <div class="modal modal-md" role="dialog" aria-modal="true">
-    <div class="modal-header">
-      <h3 class="modal-title">Edit Access — <span id="memberAccessUsername"></span></h3>
-      <button class="modal-close" onclick="closeMemberAccessModal()">✕</button>
-    </div>
-    <div class="modal-body">
-      <input type="hidden" id="memberAccessUserId" />
-      <div class="feature-grid">
-        {% set modal_features = all_features if all_features else ['incidents', 'dashboard', 'log_viewer', 'observability', 'app_health', 'settings', 'reports'] %}
-        {% for fkey in modal_features %}
-        <label class="feature-card">
-          <input type="checkbox" class="member-access-cb" value="{{ fkey }}" />
-          <span>{{ fkey | replace('_', ' ') | title }}</span>
-        </label>
-        {% endfor %}
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost" onclick="closeMemberAccessModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveMemberAccess()">Save Access</button>
-    </div>
-  </div>
-</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -605,7 +426,6 @@ var verificationState = {
   llm: false,
   jira: false,
   github: false,
-  anypoint: false,
   slack: false,
   teams: false
 };
@@ -616,7 +436,6 @@ var verificationReceipt = {
   llm: '',
   jira: '',
   github: '',
-  anypoint: '',
   slack: '',
   teams: ''
 };
@@ -625,7 +444,6 @@ var integrationEditState = {
   llm: "{{ 'false' if integration_config.get('llm') else 'true' }}" === 'true',
   jira: "{{ 'false' if integration_config.get('jira') else 'true' }}" === 'true',
   github: "{{ 'false' if integration_config.get('github') else 'true' }}" === 'true',
-  anypoint: "{{ 'false' if integration_config.get('anypoint') else 'true' }}" === 'true',
   slack: "{{ 'false' if integration_config.get('slack') else 'true' }}" === 'true',
   teams: "{{ 'false' if integration_config.get('teams') else 'true' }}" === 'true'
 };
@@ -634,7 +452,6 @@ var integrationFieldMap = {
   llm: ['llmProvider', 'llmCustomProvider', 'llmModelSelect', 'llmModel', 'llmApiKey', 'llmBaseUrl', 'llmTemperature', 'llmMaxTokens'],
   jira: ['jiraUrl', 'jiraUser', 'jiraProject', 'jiraToken'],
   github: ['githubToken', 'githubOrg', 'githubBranch'],
-  anypoint: ['anypointClientId', 'anypointClientSecret', 'anypointOrgId'],
   slack: ['slackWebhook', 'slackChannel'],
   teams: ['teamsWebhook']
 };
@@ -688,10 +505,7 @@ var llmModelCatalog = {
     'gpt-4',
     'o3',
     'o3-mini',
-    'o4-mini',
-    'o1',
-    'o1-mini',
-    'gpt-35-turbo'
+    'o4-mini'
   ],
   // ── Anthropic ────────────────────────────────────────────────────────
   anthropic: [
@@ -702,8 +516,6 @@ var llmModelCatalog = {
     'claude-3-7-sonnet-20250219',
     'claude-3-5-sonnet-20241022',
     'claude-3-5-haiku-20241022',
-    'claude-3-opus-20240229',
-    'claude-3-sonnet-20240229',
     'claude-3-haiku-20240307'
   ],
   // ── Google Gemini ────────────────────────────────────────────────────
@@ -713,7 +525,6 @@ var llmModelCatalog = {
     'gemini-2.5-flash-lite',
     'gemini-2.0-flash',
     'gemini-2.0-flash-lite',
-    'gemini-2.0-flash-thinking-exp',
     'gemini-1.5-pro',
     'gemini-1.5-flash',
     'gemini-1.5-flash-8b',
@@ -728,14 +539,8 @@ var llmModelCatalog = {
     'llama-3.3-70b-versatile',
     'llama-3.3-70b-specdec',
     'llama-3.1-8b-instant',
-    'llama3-70b-8192',
-    'llama3-8b-8192',
-    'llama3-groq-70b-8192-tool-use-preview',
-    'llama3-groq-8b-8192-tool-use-preview',
     'deepseek-r1-distill-llama-70b',
     'gemma2-9b-it',
-    'gemma-7b-it',
-    'mixtral-8x7b-32768',
     'qwen/qwq-32b',
     'qwen/qwen-2.5-72b-instruct',
     'qwen/qwen-2.5-coder-32b-instruct',
@@ -1043,18 +848,10 @@ function toggleCustomModelInput() {
 function setRuntimeEditMode(editable) {
   runtimeEditMode = editable;
 
-  [
-    'projectDescription',
-    'runtimeOtlpCollectorPort',
-    'runtimeDatabasePath',
-    'runtimePdfOutputDir',
-    'runtimePatchOutputDir'
-  ].forEach(function (id) {
-    var el = document.getElementById(id);
-    if (el) {
-      el.disabled = false;
-    }
-  });
+  var el = document.getElementById('projectDescription');
+  if (el) {
+    el.disabled = false;
+  }
 
   var saveBtn = document.getElementById('saveBtn-runtime');
   var statusEl = document.getElementById('runtimeConfigState');
@@ -1083,12 +880,6 @@ function getSelectedProjectId() {
   return el ? el.value : '{{ selected_project.id if selected_project else "" }}';
 }
 
-function getCheckedFeatures(selector) {
-  return Array.from(document.querySelectorAll(selector + ':checked')).map(function (c) {
-    return c.value;
-  });
-}
-
 function getIntegrationPayload(type) {
   var payload = { project_id: getSelectedProjectId() };
 
@@ -1109,10 +900,6 @@ function getIntegrationPayload(type) {
     payload.token = document.getElementById('githubToken').value;
     payload.org = document.getElementById('githubOrg').value.trim();
     payload.default_branch = document.getElementById('githubBranch').value.trim();
-  } else if (type === 'anypoint') {
-    payload.client_id = document.getElementById('anypointClientId').value.trim();
-    payload.client_secret = document.getElementById('anypointClientSecret').value;
-    payload.org_id = document.getElementById('anypointOrgId').value.trim();
   } else if (type === 'slack') {
     payload.webhook_url = document.getElementById('slackWebhook').value.trim();
     payload.channel = document.getElementById('slackChannel').value.trim();
@@ -1159,11 +946,6 @@ function validateIntegrationFields(type) {
   } else if (type === 'github') {
     if (!payload.token) {
       alert('GitHub token is required.');
-      return false;
-    }
-  } else if (type === 'anypoint') {
-    if (!payload.client_id || !payload.client_secret) {
-      alert('Anypoint client ID and client secret are required.');
       return false;
     }
   } else if (type === 'slack') {
@@ -1254,9 +1036,7 @@ async function submitMemberAction() {
   }
 
   var isNew = document.getElementById('memberModeNew').checked;
-  var features = getCheckedFeatures('.mem-feature-cb');
   var payload = {
-    feature_access: features,
     project_ids: [projectId]
   };
 
@@ -1304,18 +1084,6 @@ async function submitMemberAction() {
         alert(assignData.error || 'Error assigning one of the selected users to the project');
         return;
       }
-
-      const featureResp = await fetch('/api/team-admin/set-features', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: existingUserId, features: features })
-      });
-
-      if (!featureResp.ok) {
-        const featureData = await featureResp.json();
-        alert(featureData.error || 'Error updating feature access for one of the selected users');
-        return;
-      }
     }
 
     location.reload();
@@ -1325,11 +1093,7 @@ async function submitMemberAction() {
 async function saveRuntimeConfig() {
   var payload = {
     project_id: getSelectedProjectId(),
-    description: document.getElementById('projectDescription').value.trim(),
-    otlp_collector_port: document.getElementById('runtimeOtlpCollectorPort').value,
-    database_path: document.getElementById('runtimeDatabasePath').value.trim(),
-    pdf_output_dir: document.getElementById('runtimePdfOutputDir').value.trim(),
-    patch_output_dir: document.getElementById('runtimePatchOutputDir').value.trim()
+    description: document.getElementById('projectDescription').value.trim()
   };
 
   if (!payload.project_id) {
@@ -1349,13 +1113,13 @@ async function saveRuntimeConfig() {
     const d = await r.json();
 
     if (!r.ok || !d.success) {
-      throw new Error(d.error || 'Failed to save project configuration');
+      throw new Error(d.error || 'Failed to save project description');
     }
 
     statusEl.textContent = 'Status: Saved successfully';
     statusEl.classList.add('table-primary');
     setRuntimeEditMode(false);
-    alert('Project configuration saved successfully.');
+    alert('Project description saved successfully.');
   } catch (e) {
     statusEl.textContent = 'Status: ' + e.message;
     statusEl.classList.remove('table-primary');
@@ -1453,39 +1217,6 @@ async function saveIntegration(type) {
   }
 }
 
-async function saveMemberAccess() {
-  var uid = document.getElementById('memberAccessUserId').value;
-  var features = getCheckedFeatures('.member-access-cb');
-
-  const r = await fetch('/api/team-admin/set-features', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user_id: uid, features: features })
-  });
-
-  if (r.ok) {
-    closeMemberAccessModal();
-    location.reload();
-  } else {
-    const d = await r.json();
-    alert(d.error || 'Error saving access');
-  }
-}
-
-function openMemberAccessModal(uid, uname, accessCsv) {
-  document.getElementById('memberAccessUserId').value = uid;
-  document.getElementById('memberAccessUsername').textContent = uname;
-  var access = accessCsv ? accessCsv.split(',') : [];
-  document.querySelectorAll('.member-access-cb').forEach(function (cb) {
-    cb.checked = access.length === 0 || access.includes(cb.value);
-  });
-  document.getElementById('memberAccessModal').hidden = false;
-}
-
-function closeMemberAccessModal() {
-  document.getElementById('memberAccessModal').hidden = true;
-}
-
 async function removeMember(userId, username, projectId) {
   if (!confirm('Remove "' + username + '" from this project?')) return;
 
@@ -1522,68 +1253,12 @@ function switchProjectContext(projectId) {
   });
 }
 
-// ── Repo Mappings ─────────────────────────────────────────────────────────
-var _repoMappings = {};
-
-function renderRepoMappingRows() {
-  var container = document.getElementById('repoMappingRows');
-  container.innerHTML = '';
-  Object.keys(_repoMappings).forEach(function(appName) {
-    var val = _repoMappings[appName] || {};
-    container.appendChild(_buildRepoMappingRow(appName, val.repo || '', val.branch || 'main', val.description || ''));
-  });
-}
-
-function _buildRepoMappingRow(appName, repo, branch, description) {
-  var row = document.createElement('div');
-  row.className = 'form-row repo-mapping-row';
-  row.style.cssText = 'align-items:flex-end;margin-bottom:0.5rem;';
-  row.innerHTML = [
-    '<div class="form-group" style="flex:1.2">',
-    '  <label class="form-label">App Name</label>',
-    '  <input class="form-input repo-app-name" type="text" value="' + _esc(appName) + '" placeholder="order-processing-service"/>',
-    '</div>',
-    '<div class="form-group" style="flex:2">',
-    '  <label class="form-label">Repository (org/repo)</label>',
-    '  <input class="form-input repo-repo" type="text" value="' + _esc(repo) + '" placeholder="my-org/my-repo"/>',
-    '</div>',
-    '<div class="form-group" style="flex:0.8">',
-    '  <label class="form-label">Branch</label>',
-    '  <input class="form-input repo-branch" type="text" value="' + _esc(branch) + '" placeholder="main"/>',
-    '</div>',
-    '<div class="form-group" style="flex:1.2">',
-    '  <label class="form-label">Description</label>',
-    '  <input class="form-input repo-description" type="text" value="' + _esc(description) + '" placeholder="Optional"/>',
-    '</div>',
-    '<div style="flex:0 0 auto;padding-bottom:0.3rem;">',
-    '  <button class="btn btn-ghost btn-sm" onclick="this.closest(\'.repo-mapping-row\').remove()" title="Remove">🗑</button>',
-    '</div>',
-  ].join('');
-  return row;
-}
-
-function _esc(s) {
-  var d = document.createElement('div');
-  d.appendChild(document.createTextNode(String(s || '')));
-  return d.innerHTML.replace(/"/g, '"');
-}
-
-function addRepoMappingRow() {
-  document.getElementById('repoMappingRows').appendChild(_buildRepoMappingRow('', '', 'main', ''));
-}
-
-function saveSourceCodeConfig() {
-  var statusEl = document.getElementById('sourceCodeConfigStatus');
-  statusEl.textContent = 'Source-code settings are saved with the GitHub integration. Open the GitHub tab, enter the token, verify access, and save the configuration.';
-  showTab('tab-github');
-}
-
 document.addEventListener('DOMContentLoaded', function () {
   toggleMemberMode();
   toggleCustomProvider();
   updateModelOptions();
 
-  ['llm', 'jira', 'github', 'anypoint', 'slack', 'teams'].forEach(function (type) {
+  ['llm', 'jira', 'github', 'slack', 'teams'].forEach(function (type) {
     setIntegrationButtons(type, verificationState[type]);
   });
 
@@ -1603,9 +1278,6 @@ document.addEventListener('DOMContentLoaded', function () {
     'githubToken',
     'githubOrg',
     'githubBranch',
-    'anypointClientId',
-    'anypointClientSecret',
-    'anypointOrgId',
     'slackWebhook',
     'slackChannel',
     'teamsWebhook'
@@ -1616,7 +1288,6 @@ document.addEventListener('DOMContentLoaded', function () {
     var type = id.indexOf('llm') === 0 ? 'llm'
       : id.indexOf('jira') === 0 ? 'jira'
       : id.indexOf('github') === 0 ? 'github'
-      : id.indexOf('anypoint') === 0 ? 'anypoint'
       : id.indexOf('slack') === 0 ? 'slack'
       : 'teams';
 
@@ -1635,24 +1306,14 @@ document.addEventListener('DOMContentLoaded', function () {
     showTab(hash);
   }
 
-  document.querySelectorAll('.edit-member-access-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      openMemberAccessModal(btn.dataset.uid, btn.dataset.uname, btn.dataset.access);
-    });
-  });
-
   document.querySelectorAll('.remove-member-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       removeMember(btn.dataset.uid, btn.dataset.uname, btn.dataset.project);
     });
   });
 
-  ['llm', 'jira', 'github', 'anypoint', 'slack', 'teams'].forEach(function (type) {
+  ['llm', 'jira', 'github', 'slack', 'teams'].forEach(function (type) {
     setIntegrationEditMode(type, integrationEditState[type]);
-  });
-
-  document.getElementById('memberAccessModal').addEventListener('click', function (e) {
-    if (e.target === this) closeMemberAccessModal();
   });
 });
 </script>

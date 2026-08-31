@@ -97,7 +97,6 @@
             <tr>
               <th>User</th>
               <th>Role</th>
-              <th>Access</th>
               <th class="admin-actions-col">Actions</th>
             </tr>
           </thead>
@@ -110,21 +109,8 @@
               </td>
               <td><span class="badge badge-info">{{ m.role | replace('_', ' ') | title }}</span></td>
               <td>
-                {% if m.feature_access %}
-                  <div class="table-primary table-primary--sm">{{ m.feature_access | length }} feature(s)</div>
-                {% else %}
-                  <div class="table-primary table-primary--sm">Full access</div>
-                {% endif %}
-              </td>
-              <td>
                 <div class="table-actions">
                   <a class="btn btn-ghost btn-sm" href="/team-admin/onboarding?project_id={{ selected_project.id if selected_project else '' }}#tab-member">✏ Edit</a>
-                  <button class="btn btn-ghost btn-sm manage-access-btn"
-                    data-uid="{{ m.user_id or m.id }}"
-                    data-uname="{{ m.username | e }}"
-                    data-access="{{ m.feature_access | join(',') if m.feature_access else '' }}">
-                    🔑 Access
-                  </button>
                   {% if selected_project %}
                   <button class="btn btn-ghost btn-sm team-remove-btn"
                     data-uid="{{ m.user_id or m.id }}"
@@ -168,7 +154,6 @@
           ('llm', '🤖', 'LLM Provider'),
           ('jira', '📋', 'Jira'),
           ('github', '🐙', 'GitHub'),
-          ('anypoint', '☁', 'Anypoint Platform'),
           ('slack', '💬', 'Slack'),
           ('teams', '🟦', 'MS Teams')
         ] %}
@@ -193,60 +178,11 @@
   </div>
 </div>
 
-<div id="accessModal" class="modal-overlay" hidden>
-  <div class="modal modal-md" role="dialog" aria-modal="true">
-    <div class="modal-header">
-      <h3 class="modal-title">Manage Access — <span id="accessModalUsername"></span></h3>
-      <button class="modal-close" onclick="closeAccessModal()">✕</button>
-    </div>
-    <div class="modal-body">
-      <input type="hidden" id="accessUserId" />
-      <div id="featureCheckboxes" class="feature-grid">
-        {% set all_features = [
-          ('incidents', '🚨 Incidents'),
-          ('dashboard', '📊 Dashboard'),
-          ('log_viewer', '📜 Log Viewer'),
-          ('observability', '🔭 Observability'),
-          ('app_health', '💚 App Health'),
-          ('settings', '⚙ Settings'),
-          ('reports', '📄 Reports')
-        ] %}
-        {% for fkey, flabel in all_features %}
-        <label class="feature-card">
-          <input type="checkbox" class="feature-cb" value="{{ fkey }}" />
-          <span>{{ flabel }}</span>
-        </label>
-        {% endfor %}
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost" onclick="closeAccessModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveAccess()">Save Access</button>
-    </div>
-  </div>
-</div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-  document.querySelectorAll('.manage-access-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      const uid = btn.dataset.uid;
-      const uname = btn.dataset.uname;
-      const access = btn.dataset.access ? btn.dataset.access.split(',') : [];
-
-      document.getElementById('accessUserId').value = uid;
-      document.getElementById('accessModalUsername').textContent = uname;
-
-      document.querySelectorAll('.feature-cb').forEach(function (cb) {
-        cb.checked = access.length === 0 || access.includes(cb.value);
-      });
-
-      document.getElementById('accessModal').hidden = false;
-    });
-  });
-
   document.querySelectorAll('.team-remove-btn').forEach(function (btn) {
     btn.addEventListener('click', async function () {
       if (!confirm('Remove "' + btn.dataset.uname + '" from this project?')) return;
@@ -265,36 +201,7 @@ document.addEventListener('DOMContentLoaded', function () {
       }
     });
   });
-
-  document.getElementById('accessModal').addEventListener('click', function (e) {
-    if (e.target === this) closeAccessModal();
-  });
 });
-
-function closeAccessModal() {
-  document.getElementById('accessModal').hidden = true;
-}
-
-async function saveAccess() {
-  const uid = document.getElementById('accessUserId').value;
-  const features = Array.from(document.querySelectorAll('.feature-cb:checked')).map(function (c) {
-    return c.value;
-  });
-
-  const r = await fetch('/api/team-admin/set-features', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user_id: uid, features: features })
-  });
-
-  if (r.ok) {
-    closeAccessModal();
-    location.reload();
-  } else {
-    const d = await r.json();
-    alert(d.error || 'Error saving access');
-  }
-}
 
 async function switchProject(projectId) {
   projectId = projectId || document.getElementById('projectSelector').value;

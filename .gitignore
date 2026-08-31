@@ -36,12 +36,30 @@ ENV/
 *.swo
 *~
 
-# Data & outputs
+# Runtime data, secrets & generated outputs
+# Keep only data/.gitkeep (if present) in source control. Never commit
+# encryption keys, session/auth data, databases, generated patches, or reports.
+data/.integration.key
+data/auth_data.json
+data/sessions.json
+data/customers.json
 data/incidents.db
-data/incidents.db-journal
-data/pdfs/*.pdf
-data/patches/*.patch
+data/incidents.db-*
+data/*.db
+data/*.db-*
+data/pdfs/
+data/patches/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.key
+*.pem
+*.p12
+*.pfx
 *.log
+diag_output.txt
+fix_output.txt
 
 # OS
 .DS_Store
@@ -58,3 +76,6 @@ htmlcov/
 temp/
 tmp/
 start-all-applications.bat
+
+# graphify-axet
+.graphify/

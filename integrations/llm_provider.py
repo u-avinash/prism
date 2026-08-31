@@ -631,8 +631,11 @@ class LLMProvider:
                 prompt, system_message, temperature, json_mode,
             )
 
+        except TimeoutError as exc:
+            # Covers builtin TimeoutError, socket.timeout, and asyncio.TimeoutError.
+            primary_error: Exception = ConnectionError(f"Request timed out for {self.provider}: {exc}")
         except ConnectionResetError as exc:
-            primary_error: Exception = ConnectionError(f"Connection reset by {self.provider}: {exc}")
+            primary_error = ConnectionError(f"Connection reset by {self.provider}: {exc}")
         except OSError as exc:
             if "WinError 10054" in str(exc) or "connection" in str(exc).lower():
                 primary_error = ConnectionError(f"Connection forcibly closed by {self.provider}: {exc}")
@@ -644,10 +647,19 @@ class LLMProvider:
             is_rate_limited = any(t in lower_msg for t in (
                 "rate", "429", "503", "resource_exhausted", "quota", "unavailable", "high demand", "overloaded",
             ))
+            # Provider SDKs (openai, httpx, requests) phrase timeouts inconsistently —
+            # "Request timed out.", "timed out", "timeout", "ReadTimeout", "deadline exceeded", etc.
+            # Match on all common variants so timeouts are classified as retryable
+            # ConnectionError instead of falling through to `raise` unclassified below,
+            # which previously bypassed both LLM-level retry/backoff and fallback providers.
+            is_timeout = any(t in lower_msg for t in (
+                "timed out", "timeout", "deadline exceeded", "read timeout", "readtimeout",
+            ))
             if is_rate_limited:
                 logger.warning("Rate limit / quota exhaustion on %s/%s", self.provider, self.model)
                 primary_error = RateLimitError(f"Rate limit / transient provider overload: {exc}")
-            elif "connection" in lower_msg or "timeout" in lower_msg:
+            elif is_timeout or "connection" in lower_msg:
+                logger.warning("Timeout / connection issue on %s/%s: %s", self.provider, self.model, exc)
                 primary_error = ConnectionError(f"Failed to connect to {self.provider}: {exc}")
             elif "auth" in lower_msg or "api key" in lower_msg or "401" in error_msg:
                 raise ValueError(f"Authentication failed for {self.provider}: {exc}")
