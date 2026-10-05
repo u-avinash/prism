@@ -1,44 +1,40 @@
-🚨 What if your production incidents fixed themselves?
+🚨 What if production incidents arrived with a governed, reviewable remediation package instead of only a raw alert?
 
-I built Prism — an autonomous AI incident management platform that takes a production error all the way to a reviewed, approved GitHub Pull Request. No 3am pages. No manual Jira tickets. No branch creation by hand.
+I built Prism—an open-source AI-assisted incident-management platform that turns qualifying OTLP error logs into a structured engineering workflow.
 
-Here's what the pipeline looks like:
+The flow:
 
-1️⃣ Your app emits an OTLP error log
-2️⃣ Prism deduplicates it (SimHash fingerprinting — no duplicate tickets)
-3️⃣ Classifies severity: LOW / MEDIUM / HIGH / CRITICAL
-4️⃣ For HIGH/CRITICAL: fetches the actual source file from GitHub
-5️⃣ Runs an 11-step LangGraph agentic workflow:
-   → AI Root Cause Analysis (with live code context)
-   → Code fix (language & framework aware)
-   → Quality scoring (correctness / safety / code quality / completeness)
-   → PDF report + downloadable patch file
-6️⃣ ⏸️ PAUSES — and waits for a human to approve
-7️⃣ One click later: Slack alert, Jira ticket, GitHub branch, PR — all done
+1️⃣ An application or OpenTelemetry Collector sends an OTLP error log  
+2️⃣ Prism persists telemetry, resolves the project, and deduplicates repeated errors with SimHash  
+3️⃣ It assesses severity and, for qualifying incidents, runs a LangGraph workflow  
+4️⃣ The workflow prepares:
+   → AI-assisted Root Cause Analysis with available code/runtime context  
+   → Proposed code fix and test suggestion  
+   → Quality reflection: correctness, safety, code quality, completeness  
+   → Downloadable patch and RCA PDF  
+5️⃣ ⏸️ It pauses for a human reviewer  
+6️⃣ Only after approval, configured notifications, Jira creation, and GitHub PR creation can proceed
 
-One decision. That's the only manual step.
+The key principle is intentional:
 
+🔒 **AI prepares; humans decide; the system executes approved work.**
 
-A few design principles I'm proud of:
+No code is deployed to production by Prism. Reviewers can inspect the evidence package, comment, reject, or request regenerated fixes with feedback before any Jira or GitHub delivery action.
 
-🔒 Human-in-the-loop is non-negotiable
-The AI generates; the engineer decides. No code lands in your repo without human sign-off. Reviewers get the full RCA, a fix diff, quality scores, and a downloadable patch to test locally. If the fix is wrong, they reject with feedback — the system regenerates with that feedback injected into the prompt.
+Recent platform work also strengthened the operational boundary:
 
-🧠 Pluggable LLM — your choice
-OpenAI, Anthropic, Azure OpenAI, Gemini, Groq, or local Ollama. Swap providers in one settings field. No code changes.
+• Production ingestion requires a project API key  
+• The production configuration is fail closed for auth, tenant assignment, CORS, secure cookies, and CSRF  
+• Project integrations are encrypted at rest  
+• Workflow-run and node-event history provide operational evidence without retaining prompts, source code, or generated fixes in those records  
+• Admins can perform an audited recovery of incomplete approved post-approval work—without repeating the RCA, fix, or approval decision  
+• Trace and metric intake is currently acknowledged but not persisted; this boundary is stated explicitly in the UI and docs
 
-🔁 Resilient by design
-Every LLM node retries on failure with automatic fallback to a clean FAILED state. The workflow always terminates. No hanging pipelines, ever.
+Prism is built with Python, FastAPI, LangGraph, SQLite/SQLAlchemy, OpenTelemetry, and pluggable LLM providers.
 
-🏢 Multi-tenant, encrypted at rest
-Each team's credentials (Jira, GitHub, LLM keys, Slack webhooks) are AES-encrypted and fully isolated. Platform admins can't see other teams' secrets.
+The repository includes a credential-free local Postman regression suite. For production, deploy behind trusted TLS infrastructure and route OTLP through a collector or gateway that injects a per-project ingestion key.
 
-
-The goal was never to replace engineers. It was to compress the 45-minute research-and-draft phase into a 90-second approval decision.
-
-Full source code — open source, Python 3.11+, zero-config quick start:
+Full source:
 👉 https://github.com/u-avinash/prism
 
-What does your current incident response workflow look like? Would love to hear how others are thinking about AI in this space.
-
-#AI #DevOps #SRE #LangGraph #OpenTelemetry #AIOps
+#AI #DevOps #SRE #LangGraph #OpenTelemetry #AIOps #IncidentManagement #Python

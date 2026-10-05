@@ -55,7 +55,7 @@ class TelemetryLog(Base):
     raw_payload = Column(Text, nullable=False)
     attributes = Column(JSON, nullable=True)
     incident_created = Column(Boolean, default=False, nullable=False, index=True)
-    incident_id = Column(String(4), nullable=True, index=True)
+    incident_id = Column(String(8), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -64,8 +64,8 @@ class Incident(Base):
     """SQLAlchemy model for incidents table."""
     __tablename__ = "incidents"
 
-    # Primary key (4-character alphanumeric ID, e.g., A7CB)
-    incident_id = Column(String(4), primary_key=True, nullable=False)
+    # Primary key (up to 8-character project-prefixed alphanumeric ID, e.g., ZOFFAT1X)
+    incident_id = Column(String(8), primary_key=True, nullable=False)
 
     # Tenant ownership. Legacy rows may remain NULL until explicitly backfilled.
     project_id = Column(String(64), nullable=True, index=True)
@@ -81,7 +81,7 @@ class Incident(Base):
     # Error detection
     error_fingerprint = Column(String(64), nullable=True, index=True)
     is_duplicate = Column(Boolean, default=False)
-    existing_incident_id = Column(String(4), nullable=True)
+    existing_incident_id = Column(String(8), nullable=True)
     occurrence_count = Column(Integer, default=1, nullable=False)
     last_occurrence_at = Column(DateTime, default=datetime.utcnow, nullable=True)
 
@@ -148,7 +148,7 @@ class Incident(Base):
     detected_framework = Column(String(100), nullable=True)              # spring, django, express, etc.
 
     # Incident grouping (related errors grouped under a primary incident)
-    incident_group_id = Column(String(4), nullable=True, index=True)
+    incident_group_id = Column(String(8), nullable=True, index=True)
     is_primary_incident = Column(Boolean, default=True, nullable=True)
 
     # SLA tracking
@@ -185,12 +185,67 @@ class IncidentComment(Base):
     __tablename__ = "incident_comments"
 
     comment_id = Column(String(16), primary_key=True, nullable=False)
-    incident_id = Column(String(4), nullable=False, index=True)
+    incident_id = Column(String(8), nullable=False, index=True)
     author = Column(String(255), nullable=False, default="user")
     content = Column(Text, nullable=False)
     comment_type = Column(String(20), nullable=False, default="comment")  # "comment" | "system"
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class SecurityAuditEvent(Base):
+    """Append-only security and compliance audit record."""
+
+    __tablename__ = "security_audit_events"
+
+    event_id = Column(String(36), primary_key=True, nullable=False)
+    project_id = Column(String(64), nullable=True, index=True)
+    actor_type = Column(String(32), nullable=False)
+    actor_id = Column(String(255), nullable=True)
+    action = Column(String(100), nullable=False, index=True)
+    target_type = Column(String(64), nullable=True)
+    target_id = Column(String(255), nullable=True)
+    outcome = Column(String(32), nullable=False, default="success")
+    source_ip = Column(String(64), nullable=True)
+    details = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class WorkflowRun(Base):
+    """Durable, append-only record of one incident workflow execution."""
+
+    __tablename__ = "workflow_runs"
+
+    run_id = Column(String(36), primary_key=True, nullable=False)
+    incident_id = Column(String(8), nullable=False, index=True)
+    project_id = Column(String(64), nullable=True, index=True)
+    run_type = Column(String(32), nullable=False)  # full | post_approval | recovery
+    trigger_source = Column(String(32), nullable=False)  # ingestion | operator | system
+    triggered_by = Column(String(255), nullable=True)
+    status = Column(String(32), nullable=False, default="RUNNING", index=True)
+    recovery_reason = Column(String(500), nullable=True)
+    error_summary = Column(Text, nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    completed_at = Column(DateTime, nullable=True)
+    duration_seconds = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class WorkflowStepEvent(Base):
+    """Append-only operational evidence emitted for workflow steps and retries."""
+
+    __tablename__ = "workflow_step_events"
+
+    event_id = Column(String(36), primary_key=True, nullable=False)
+    run_id = Column(String(36), nullable=False, index=True)
+    incident_id = Column(String(8), nullable=False, index=True)
+    project_id = Column(String(64), nullable=True, index=True)
+    step_name = Column(String(100), nullable=False, index=True)
+    event_type = Column(String(32), nullable=False, index=True)  # started | succeeded | failed | retrying
+    attempt = Column(Integer, nullable=False, default=1)
+    message = Column(Text, nullable=True)
+    duration_seconds = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
 class ProjectIntegrationConfig(Base):
@@ -207,9 +262,8 @@ class ProjectIntegrationConfig(Base):
     slack = Column(JSON, nullable=True)
     teams = Column(JSON, nullable=True)
     runtime = Column(JSON, nullable=True)
-    # repo_mappings: dict of app_name -> {repo, branch, description}
-    # No secret fields — stored as plain JSON
-    repo_mappings = Column(JSON, nullable=True)
+    # Records contain only non-reversible key digests and lifecycle metadata.
+    api_keys = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -282,11 +336,30 @@ def init_database():
             )
             logger.info("Added runtime column to project_integration_configs")
 
-        if "repo_mappings" not in pic_columns:
+        # Legacy repository mappings have been superseded by first-class
+        # project applications. Remove stale data where the local SQLite
+        # runtime supports DROP COLUMN; failure is non-fatal for older files.
+        if "repo_mappings" in pic_columns:
+            try:
+                connection.exec_driver_sql(
+                    "ALTER TABLE project_integration_configs DROP COLUMN repo_mappings"
+                )
+                logger.info(
+                    "Removed legacy repo_mappings column from "
+                    "project_integration_configs"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not remove legacy repo_mappings column; it will be "
+                    "ignored by the current application: %s",
+                    exc,
+                )
+
+        if "api_keys" not in pic_columns:
             connection.exec_driver_sql(
-                "ALTER TABLE project_integration_configs ADD COLUMN repo_mappings JSON"
+                "ALTER TABLE project_integration_configs ADD COLUMN api_keys JSON"
             )
-            logger.info("Added repo_mappings column to project_integration_configs")
+            logger.info("Added api_keys column to project_integration_configs")
 
         # --- telemetry_logs migrations ---
         telemetry_columns = [
@@ -319,7 +392,7 @@ def init_database():
             ("workflow_started_at",    "DATETIME"),
             ("source_technology",      "VARCHAR(50)"),
             ("detected_framework",     "VARCHAR(100)"),
-            ("incident_group_id",      "VARCHAR(4)"),
+            ("incident_group_id",      "VARCHAR(8)"),
             ("is_primary_incident",    "BOOLEAN DEFAULT 1"),
             ("sla_acknowledged_at",    "DATETIME"),
             ("sla_resolution_due_at",  "DATETIME"),
@@ -346,6 +419,30 @@ def init_database():
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_incidents_project_fingerprint "
             "ON incidents (project_id, error_fingerprint)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_security_audit_events_project_created "
+            "ON security_audit_events (project_id, created_at)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_security_audit_events_action_created "
+            "ON security_audit_events (action, created_at)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_workflow_runs_project_started "
+            "ON workflow_runs (project_id, started_at)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_workflow_runs_incident_started "
+            "ON workflow_runs (incident_id, started_at)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_workflow_step_events_run_created "
+            "ON workflow_step_events (run_id, created_at)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_workflow_step_events_project_created "
+            "ON workflow_step_events (project_id, created_at)"
         )
 
     logger.info("Database initialized successfully")

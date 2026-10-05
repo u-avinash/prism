@@ -1,0 +1,19 @@
+# PRISM MuleSoft demo runtime properties.
+# Override with environment variables or secure property management as required.
+
+http:
+  port: "8083"
+
+otlp:
+  # Within Docker Compose the collector hostname is otel-collector.
+  collector:
+    host: "${OTEL_COLLECTOR_HOST:-otel-collector}"
+    port: "${OTEL_COLLECTOR_PORT:-4318}"
+
+prism:
+  project:
+    name: "${PRISM_DEMO_PROJECT_NAME:-prism-capabilities-demo}"
+  environment: "${PRISM_DEMO_ENVIRONMENT:-demo}"
+  repository:
+    url: "${PRISM_DEMO_REPOSITORY_URL:-https://github.com/your-org/prism-capabilities-demo}"
+    branch: "${PRISM_DEMO_REPOSITORY_BRANCH:-main}"

@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <configuration-properties file="config.yaml"/>
+
+    <http:listener-config name="apiListener">
+        <http:listener-connection host="0.0.0.0" port="${http.port}"/>
+    </http:listener-config>
+
+    <!-- The outbound request goes to the OpenTelemetry Collector, not directly
+         to PRISM. The collector injects the project API key before forwarding. -->
+    <http:request-config name="otlpCollector">
+        <http:request-connection protocol="HTTP"
+                                 host="${otlp.collector.host}"
+                                 port="${otlp.collector.port}"/>
+    </http:request-config>
+
+    <flow name="prism-mule-fulfillment-flow">
+        <http:listener config-ref="apiListener"
+                       path="/fulfill/{orderId}"
+                       allowedMethods="POST"/>
+        <set-variable variableName="scenario"
+                      value="#[attributes.queryParams.scenario default 'success']"/>
+        <set-variable variableName="orderId" value="#[attributes.uriParams.orderId]"/>
+
+        <choice doc:name="Choose intentional demo scenario">
+            <when expression="#[vars.scenario == 'success']">
+                <set-payload value="#[{ orderId: vars.orderId, status: 'fulfilled' }]"/>
+            </when>
+            <when expression="#[vars.scenario == 'downstream-timeout']">
+                <raise-error type="PRISM:DOWNSTREAM_TIMEOUT"
+                             description="#['ERP fulfillment API timed out after 30s for order ' ++ vars.orderId]"/>
+            </when>
+            <when expression="#[vars.scenario == 'mapping-error']">
+                <ee:transform doc:name="Force mapping error">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  orderId: vars.orderId,
+  warehouseId: payload.requiredWarehouse.id
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <when expression="#[vars.scenario == 'critical']">
+                <raise-error type="PRISM:FULFILLMENT_INTEGRITY"
+                             description="#['Duplicate fulfillment request accepted for order ' ++ vars.orderId]"/>
+            </when>
+            <otherwise>
+                <raise-error type="PRISM:UNKNOWN_SCENARIO"
+                             description="#['Unknown scenario: ' ++ vars.scenario]"/>
+            </otherwise>
+        </choice>
+
+        <error-handler>
+            <!-- Preserve the Mule error response and also create an OTLP ERROR
+                 record with Mule flow, exception, HTTP and project metadata. -->
+            <on-error-propagate type="ANY" logException="true">
+                <set-variable variableName="originalErrorType"
+                              value="#[error.errorType.identifier default 'MULE_ERROR']"/>
+                <set-variable variableName="originalErrorMessage"
+                              value="#[error.description default error.detailedDescription default 'Unknown Mule error']"/>
+
+                <ee:transform doc:name="Build OTLP error log">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  resourceLogs: [
+    {
+      resource: {
+        attributes: [
+          { key: "service.name", value: { stringValue: "mulesoft-fulfillment-api" } },
+          { key: "service.version", value: { stringValue: "1.0.0-demo" } },
+          { key: "service.namespace", value: { stringValue: "prism-demo" } },
+          { key: "deployment.environment.name", value: { stringValue: p('prism.environment') } },
+          { key: "prism.project.name", value: { stringValue: p('prism.project.name') } },
+          { key: "prism.repository.url", value: { stringValue: p('prism.repository.url') } },
+          { key: "prism.repository.branch", value: { stringValue: p('prism.repository.branch') } },
+          { key: "mule.application.name", value: { stringValue: app.name } },
+          { key: "mule.deployment.type", value: { stringValue: "standalone-demo" } }
+        ]
+      },
+      scopeLogs: [
+        {
+          scope: { name: "prism.demo.mulesoft.fulfillment" },
+          logRecords: [
+            {
+              severityNumber: 17,
+              severityText: "ERROR",
+              body: { stringValue: vars.originalErrorMessage },
+              attributes: [
+                { key: "exception.type", value: { stringValue: vars.originalErrorType } },
+                { key: "exception.message", value: { stringValue: vars.originalErrorMessage } },
+                { key: "exception.stacktrace", value: { stringValue: error.detailedDescription default vars.originalErrorMessage } },
+                { key: "mule.flow.name", value: { stringValue: flow.name } },
+                { key: "logger.name", value: { stringValue: "prism.demo.mulesoft.fulfillment" } },
+                { key: "prism.demo.scenario", value: { stringValue: vars.scenario } },
+                { key: "prism.demo.intentional", value: { stringValue: "true" } },
+                { key: "order.id", value: { stringValue: vars.orderId } },
+                { key: "http.route", value: { stringValue: "/fulfill/{orderId}" } },
+                { key: "http.request.method", value: { stringValue: "POST" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+
+                <http:request config-ref="otlpCollector"
+                              method="POST"
+                              path="/v1/logs"
+                              responseTimeout="5000">
+                    <http:headers><![CDATA[#[{
+  "Content-Type": "application/json"
+}]]]></http:headers>
+                </http:request>
+
+                <set-payload value="#[{ error: vars.originalErrorMessage, scenario: vars.scenario }]"/>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+</mule>

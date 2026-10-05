@@ -51,6 +51,39 @@ from storage.models import Severity
 logger = logging.getLogger(__name__)
 
 
+def _record_workflow_step_event(
+    state: AgentState,
+    step_name: str,
+    event_type: str,
+    *,
+    attempt: int = 1,
+    message: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+) -> None:
+    """Persist best-effort, non-sensitive workflow operational evidence."""
+    run_id = state.get("workflow_run_id")
+    incident_id = state.get("incident_id")
+    if not run_id or not incident_id:
+        return
+    try:
+        from storage.database import get_session
+        from storage.workflow_history_repository import WorkflowHistoryRepository
+
+        with get_session() as session:
+            WorkflowHistoryRepository(session).add_step_event(
+                run_id=run_id,
+                incident_id=incident_id,
+                project_id=state.get("project_id"),
+                step_name=step_name,
+                event_type=event_type,
+                attempt=attempt,
+                message=message,
+                duration_seconds=duration_seconds,
+            )
+    except Exception as exc:
+        logger.debug("Unable to persist workflow step event: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # Retry wrapper for workflow nodes
 # ---------------------------------------------------------------------------
@@ -72,6 +105,10 @@ def _make_retryable_node(node_fn, node_name: str, max_retries: int = 2, retry_de
         total_attempts = max_retries + 1
 
         for attempt in range(1, total_attempts + 1):
+            started_at = time.monotonic()
+            _record_workflow_step_event(
+                state, node_name, "started", attempt=attempt
+            )
             # On a retry, clear the previous error so the node starts fresh.
             if attempt > 1:
                 state["error_message"] = None
@@ -97,9 +134,24 @@ def _make_retryable_node(node_fn, node_name: str, max_retries: int = 2, retry_de
 
             if not result_state.get("error_message"):
                 # Step succeeded.
+                _record_workflow_step_event(
+                    result_state,
+                    node_name,
+                    "succeeded",
+                    attempt=attempt,
+                    duration_seconds=round(time.monotonic() - started_at, 3),
+                )
                 return result_state
 
             # Step failed.
+            _record_workflow_step_event(
+                result_state,
+                node_name,
+                "failed",
+                attempt=attempt,
+                message=str(result_state.get("error_message") or ""),
+                duration_seconds=round(time.monotonic() - started_at, 3),
+            )
             if attempt < total_attempts:
                 logger.warning(
                     "[Workflow Retry] %s failed (attempt %d/%d) for incident %s: %s — "
@@ -123,6 +175,13 @@ def _make_retryable_node(node_fn, node_name: str, max_retries: int = 2, retry_de
                 except Exception:
                     pass
 
+                _record_workflow_step_event(
+                    result_state,
+                    node_name,
+                    "retrying",
+                    attempt=attempt,
+                    message="Retry scheduled after retryable node failure.",
+                )
                 time.sleep(retry_delay_seconds)
                 state = result_state  # carry forward the latest state on the next attempt
             else:
@@ -229,22 +288,6 @@ def _resolve_project_id_for_incident(
                 # accessible to this organization may produce an incident. Only
                 # use this route when it identifies one project unambiguously.
                 org_configured_projects.append((project, env_matches))
-
-            repo_mappings = project_config.get("repo_mappings") or {}
-            if isinstance(repo_mappings, dict):
-                for mapped_app, mapping_val in repo_mappings.items():
-                    mapped_app_token = _normalize_project_token(mapped_app)
-                    if mapped_app_token:
-                        candidate_tokens.add(mapped_app_token)
-
-                    mapped_repo = (mapping_val.get("repo") or "") if isinstance(mapping_val, dict) else ""
-                    mapped_repo_token = _normalize_project_token(mapped_repo)
-                    if mapped_repo_token:
-                        candidate_tokens.add(mapped_repo_token)
-
-                    mapped_repo_leaf = _normalize_project_token(mapped_repo.split("/")[-1] if mapped_repo else "")
-                    if mapped_repo_leaf:
-                        candidate_tokens.add(mapped_repo_leaf)
 
             candidate_tokens = {token for token in candidate_tokens if token}
 
@@ -634,6 +677,7 @@ def _release_workflow_lease(incident_id: str, token: str) -> None:
 def _run_post_approval_workflow_unlocked(
     incident_id: str,
     project_id: Optional[str] = None,
+    workflow_run_id: Optional[str] = None,
 ) -> AgentState:
     """
     Resume the workflow for an approved incident running only post-approval steps:
@@ -815,6 +859,7 @@ def _run_post_approval_workflow_unlocked(
         "email_notified": False,
         # Workflow control
         "current_node": "post_approval",
+        "workflow_run_id": workflow_run_id,
         "workflow_completed_steps": _workflow_completed_steps,
         "workflow_progress_pct": _workflow_progress_pct,
         "error_message": None,
@@ -876,6 +921,10 @@ def _run_post_approval_workflow_unlocked(
 def run_post_approval_workflow(
     incident_id: str,
     project_id: Optional[str] = None,
+    *,
+    trigger_source: str = "system",
+    triggered_by: Optional[str] = None,
+    recovery_reason: Optional[str] = None,
 ) -> AgentState:
     """Run post-approval processing once for an incident.
 
@@ -888,8 +937,42 @@ def run_post_approval_workflow(
             f"Workflow execution is already active for incident {incident_id}."
         )
 
+    run_id: Optional[str] = None
     try:
-        return _run_post_approval_workflow_unlocked(incident_id, project_id)
+        from storage.database import get_session
+        from storage.incident_repository import IncidentRepository
+        from storage.workflow_history_repository import WorkflowHistoryRepository
+
+        with get_session() as session:
+            incident = IncidentRepository(session).get_by_id(incident_id)
+            if not incident:
+                raise ValueError(f"Incident not found: {incident_id}")
+            run = WorkflowHistoryRepository(session).start_run(
+                incident_id=incident_id,
+                project_id=project_id or getattr(incident, "project_id", None),
+                run_type="recovery" if recovery_reason else "post_approval",
+                trigger_source=trigger_source,
+                triggered_by=triggered_by,
+                recovery_reason=recovery_reason,
+            )
+            run_id = run.run_id
+
+        final_state = _run_post_approval_workflow_unlocked(
+            incident_id, project_id, workflow_run_id=run_id
+        )
+        with get_session() as session:
+            WorkflowHistoryRepository(session).finish_run(
+                run_id, status="FAILED" if final_state.get("error_message") else "SUCCEEDED",
+                error_summary=final_state.get("error_message"),
+            )
+        return final_state
+    except Exception as exc:
+        if run_id:
+            with get_session() as session:
+                WorkflowHistoryRepository(session).finish_run(
+                    run_id, status="FAILED", error_summary=str(exc)
+                )
+        raise
     finally:
         _release_workflow_lease(incident_id, token)
 
@@ -1140,15 +1223,43 @@ async def run_incident_workflow(
         return initial_state
 
     workflow_app = create_agent_workflow()
+    run_id: Optional[str] = None
 
     try:
+        from storage.database import get_session
+        from storage.workflow_history_repository import WorkflowHistoryRepository
+
+        with get_session() as session:
+            run = WorkflowHistoryRepository(session).start_run(
+                incident_id=incident_id,
+                project_id=resolved_project_id,
+                run_type="full",
+                trigger_source="ingestion",
+            )
+            run_id = run.run_id
+        initial_state["workflow_run_id"] = run_id
+
         final_state = await workflow_app.ainvoke(initial_state)
+        with get_session() as session:
+            WorkflowHistoryRepository(session).finish_run(
+                run_id,
+                status="FAILED" if final_state.get("error_message") else "SUCCEEDED",
+                error_summary=final_state.get("error_message"),
+            )
         logger.info("Workflow completed for incident %s", incident_id)
         return final_state
     except Exception as exc:
         logger.error("Workflow failed for incident %s: %s", incident_id, exc)
         initial_state["error_message"] = f"Workflow execution failed: {exc}"
         initial_state["messages"] = [f"❌ Workflow failed: {exc}"]
+        if run_id:
+            try:
+                with get_session() as session:
+                    WorkflowHistoryRepository(session).finish_run(
+                        run_id, status="FAILED", error_summary=initial_state["error_message"]
+                    )
+            except Exception as history_error:
+                logger.debug("Unable to finalize workflow history: %s", history_error)
         return initial_state
     finally:
         _release_workflow_lease(incident_id, lease_token)

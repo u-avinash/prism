@@ -36,10 +36,15 @@ print("Connecting with 30s lock timeout...")
 conn = sqlite3.connect(db_path, timeout=30, isolation_level="IMMEDIATE")
 cursor = conn.cursor()
 
+# Delete dependent and append-only records first so a clean scenario run cannot
+# inherit workflow or security evidence from a previous run.
 tables_to_clear = [
+    "workflow_step_events",
+    "workflow_runs",
+    "security_audit_events",
     "incident_comments",
-    "incidents",
     "telemetry_logs",
+    "incidents",
     "project_integration_configs",
 ]
 

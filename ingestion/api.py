@@ -17,6 +17,7 @@
 """FastAPI ingestion server for log entries and incidents."""
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 from typing import List, Optional, Deque, Dict, Any, Tuple
 from datetime import datetime, timedelta
 from collections import deque
@@ -111,7 +112,20 @@ def _validate_api_key(
         project.llm (or) project-level config → api_keys: [{"key": "...", "label": "..."}]
     """
     if not authorization:
-        return None  # No auth header → open ingestion (existing behaviour)
+        if settings.effective_ingestion_auth_required:
+            raise HTTPException(
+                status_code=401,
+                detail="Authorization: Bearer <project API key> is required for ingestion",
+            )
+        if not settings.effective_allow_unassigned_ingestion:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Unassigned ingestion is disabled. Supply a project API key "
+                    "using Authorization: Bearer <project API key>."
+                ),
+            )
+        return None  # Explicitly permitted local-development compatibility.
 
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authorization header must use 'Bearer <key>' format")
@@ -121,23 +135,17 @@ def _validate_api_key(
         raise HTTPException(status_code=401, detail="API key is empty")
 
     try:
-        from storage.auth_store import list_projects, get_project_config
+        from storage.auth_store import list_projects, verify_project_api_key
         for project in list_projects():
             project_id = project.get("id", "")
             if not project_id:
                 continue
             try:
-                config = get_project_config(project_id) or {}
-                api_keys = config.get("api_keys") or []
-                if isinstance(api_keys, list):
-                    for entry in api_keys:
-                        if isinstance(entry, dict) and entry.get("key") == token:
-                            logger.info("[Auth] API key matched project %s", project_id)
-                            return project_id
-                        elif isinstance(entry, str) and entry == token:
-                            return project_id
-            except Exception:
-                pass
+                if verify_project_api_key(project_id, token):
+                    logger.info("[Auth] API key matched project %s", project_id)
+                    return project_id
+            except Exception as exc:
+                logger.debug("[Auth] API key lookup failed for project %s: %s", project_id, exc)
     except Exception as exc:
         logger.debug("[Auth] API key validation error: %s", exc)
 
@@ -392,16 +400,32 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware
+settings = get_settings()
+
+# Browser access is deliberately opt-in outside local development. A wildcard
+# origin is never combined with credentials, preventing credentialed CORS
+# requests from arbitrary websites.
+_ingestion_cors_origins = settings.get_ingestion_allowed_origins()
+if not _ingestion_cors_origins and settings.prism_environment.lower() != "production":
+    _ingestion_cors_origins = ["http://localhost:8080", "http://127.0.0.1:8080"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_ingestion_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
-settings = get_settings()
+if not settings.effective_debug_endpoints_enabled:
+    @app.middleware("http")
+    async def disable_debug_endpoints_in_production(request: Request, call_next):
+        if request.url.path.startswith("/debug/"):
+            return JSONResponse(
+                {"detail": "Debug endpoints are disabled by security policy."},
+                status_code=404,
+            )
+        return await call_next(request)
 
 # Ensure a clean or newly deleted SQLite DB is fully initialized before serving requests.
 init_database()
@@ -442,9 +466,71 @@ async def _install_asyncio_exception_handler():
         logger.warning("Failed to install asyncio exception handler: %s", e)
 
 
-# --- Lightweight ingestion diagnostics (in-memory, resets on restart) ---
-# Helps confirm whether Mule/OTel Collector is actually hitting this API instance.
+# --- Lightweight ingestion diagnostics and abuse controls (in-memory) ---
+# These reset on restart. Production deployments should additionally enforce
+# equivalent limits at their API gateway / collector boundary.
 _LAST_REQUESTS: Deque[Dict[str, Any]] = deque(maxlen=50)
+_RATE_LIMIT_WINDOW = timedelta(minutes=1)
+_INGESTION_PATHS = {"/ingest/log", "/ingest/otlp", "/v1/logs", "/v1/traces", "/v1/metrics", "/v1/events"}
+_LEGACY_MANAGEMENT_PATHS = {
+    "/incidents",
+    "/stats",
+    "/api/logs",
+    "/api/logs/filters",
+}
+_REQUEST_TIMESTAMPS: Dict[str, Deque[datetime]] = {}
+
+
+@app.middleware("http")
+async def disable_legacy_management_api(request: Request, call_next):
+    """Keep port 8000 machine-ingestion-only; browser operations belong to the UI."""
+    path = request.url.path
+    if (
+        path in _LEGACY_MANAGEMENT_PATHS
+        or (
+            path.startswith("/incidents/")
+            and path not in {"/ingest/log", "/ingest/otlp"}
+        )
+    ):
+        return JSONResponse(
+            {
+                "detail": (
+                    "The ingestion service exposes machine ingestion only. "
+                    "Use the authenticated Prism UI API on port 8080."
+                )
+            },
+            status_code=404,
+        )
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def enforce_ingestion_request_limits(request: Request, call_next):
+    """Reject oversized or burst ingestion requests before expensive processing."""
+    if request.url.path in _INGESTION_PATHS:
+        content_length = request.headers.get("content-length")
+        try:
+            if content_length and int(content_length) > settings.max_ingestion_body_bytes:
+                return JSONResponse(
+                    {"detail": "Ingestion request body exceeds the configured limit."},
+                    status_code=413,
+                )
+        except ValueError:
+            return JSONResponse({"detail": "Invalid Content-Length header."}, status_code=400)
+
+        client_id = request.client.host if request.client else "unknown"
+        now = datetime.utcnow()
+        timestamps = _REQUEST_TIMESTAMPS.setdefault(client_id, deque())
+        while timestamps and now - timestamps[0] >= _RATE_LIMIT_WINDOW:
+            timestamps.popleft()
+        if len(timestamps) >= settings.ingestion_rate_limit_per_minute:
+            return JSONResponse(
+                {"detail": "Ingestion rate limit exceeded. Retry in one minute."},
+                status_code=429,
+            )
+        timestamps.append(now)
+
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -676,7 +762,12 @@ async def debug_incident_raw(incident_id: str):
 
 # Ingest log entry
 @app.post("/ingest/log", response_model=dict)
-async def ingest_log(incident: IncidentCreate, background_tasks: BackgroundTasks):
+async def ingest_log(
+    incident: IncidentCreate,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
     """
     Ingest a log entry and create an incident.
     
@@ -686,6 +777,8 @@ async def ingest_log(incident: IncidentCreate, background_tasks: BackgroundTasks
     3. Analyzes severity
     4. (Future) Triggers agent workflow for RCA and auto-fix
     """
+    project_id = _validate_api_key(request, authorization)
+
     try:
         # Get database session
         db = next(get_db())
@@ -699,7 +792,7 @@ async def ingest_log(incident: IncidentCreate, background_tasks: BackgroundTasks
         )
         
         # Check if similar incident exists
-        existing_incident = repo.get_by_fingerprint(fingerprint)
+        existing_incident = repo.get_by_fingerprint(fingerprint, project_id=project_id)
         if existing_incident:
             # Increment occurrence count and update last occurrence time
             existing_incident.occurrence_count += 1
@@ -735,6 +828,7 @@ async def ingest_log(incident: IncidentCreate, background_tasks: BackgroundTasks
         # Create new incident
         new_incident = repo.create(
             incident=incident,
+            project_id=project_id,
             error_fingerprint=fingerprint,
             severity=severity
         )
@@ -748,7 +842,11 @@ async def ingest_log(incident: IncidentCreate, background_tasks: BackgroundTasks
                 current_workflow_node="assess_severity",
             )
             logger.info(f"Triggering workflow for incident {new_incident.incident_id}")
-            background_tasks.add_task(process_incident_workflow, new_incident.incident_id)
+            background_tasks.add_task(
+                process_incident_workflow,
+                new_incident.incident_id,
+                project_id,
+            )
         
         return {
             "status": "created",
@@ -988,7 +1086,11 @@ async def ingest_v1_logs(payload: dict, background_tasks: BackgroundTasks, reque
 # trace ingestion/correlation can be built out in a future iteration —
 # do not remove.
 @app.post("/v1/traces")
-async def ingest_v1_traces(payload: dict):
+async def ingest_v1_traces(
+    payload: dict,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
     """
     Standard OTLP v1 traces endpoint.
     
@@ -1006,6 +1108,7 @@ async def ingest_v1_traces(payload: dict):
       }]
     }
     """
+    _validate_api_key(request, authorization)
     try:
         logger.info("Received OTLP v1 traces request")
         
@@ -1057,7 +1160,11 @@ async def ingest_v1_traces(payload: dict):
 # metrics storage/alerting can be built out in a future iteration —
 # do not remove.
 @app.post("/v1/metrics")
-async def ingest_v1_metrics(payload: dict):
+async def ingest_v1_metrics(
+    payload: dict,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
     """
     Standard OTLP v1 metrics endpoint.
     
@@ -1075,6 +1182,7 @@ async def ingest_v1_metrics(payload: dict):
       }]
     }
     """
+    _validate_api_key(request, authorization)
     try:
         logger.info("Received OTLP v1 metrics request")
         
@@ -1123,7 +1231,12 @@ async def ingest_v1_metrics(payload: dict):
 
 # Legacy OTLP endpoint (for backward compatibility)
 @app.post("/ingest/otlp")
-async def ingest_otlp(payload: dict, background_tasks: BackgroundTasks):
+async def ingest_otlp(
+    payload: dict,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
     """
     Legacy OTLP log ingestion endpoint (for backward compatibility).
     
@@ -1145,11 +1258,16 @@ async def ingest_otlp(payload: dict, background_tasks: BackgroundTasks):
       }]
     }
     """
+    project_id = _validate_api_key(request, authorization)
+
     try:
         logger.info("Received OTLP log ingestion request")
         
         parser = OTLPParser()
-        telemetry_repo, telemetry_logs = _persist_telemetry_logs(payload)
+        telemetry_repo, telemetry_logs = _persist_telemetry_logs(
+            payload,
+            project_id=project_id,
+        )
 
         incidents = parser.parse_otlp_json(payload)
         
@@ -1170,6 +1288,7 @@ async def ingest_otlp(payload: dict, background_tasks: BackgroundTasks):
             # Legacy endpoint: no grouping/recurring check for backward compat
             result = _process_single_otlp_incident(
                 incident_data, repo, db, background_tasks,
+                project_id=project_id,
                 apply_grouping=False, apply_recurring_check=False,
             )
             if result["status"] == "duplicate":
@@ -1183,6 +1302,7 @@ async def ingest_otlp(payload: dict, background_tasks: BackgroundTasks):
                     telemetry_logs=telemetry_logs,
                     incident_data=incident_data,
                     incident_id=result["incident_id"],
+                    project_id=project_id,
                 )
                 created_incidents.append({
                     "incident_id": result["incident_id"],

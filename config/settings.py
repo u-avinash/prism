@@ -65,6 +65,20 @@ class Settings(BaseSettings):
     ingestion_api_host: str = "0.0.0.0"
     ingestion_api_port: int = 8000
 
+    # ── Environment & application security ───────────────────────────────────
+    # Development preserves Prism's local quick-start behaviour. Production
+    # enables fail-closed settings for tenant-scoped automation.
+    prism_environment: str = "development"
+    ingestion_auth_required: Optional[bool] = None
+    allow_unassigned_ingestion: Optional[bool] = None
+    ingestion_allowed_origins: str = ""
+    ui_allowed_origins: str = ""
+    ui_cookie_secure: Optional[bool] = None
+    csrf_enabled: Optional[bool] = None
+    debug_endpoints_enabled: Optional[bool] = None
+    max_ingestion_body_bytes: int = 1_048_576
+    ingestion_rate_limit_per_minute: int = 60
+
     # ── Storage ───────────────────────────────────────────────────────────────
     database_path: str = "./data/incidents.db"
     pdf_output_dir: str = "./data/pdfs"
@@ -100,6 +114,64 @@ class Settings(BaseSettings):
     llm_cache_ttl_hours: int = 24
     rate_limit_requests_per_minute: int = 10
 
+    def _is_production(self) -> bool:
+        return self.prism_environment.strip().lower() == "production"
+
+    @property
+    def effective_ingestion_auth_required(self) -> bool:
+        return self._is_production() if self.ingestion_auth_required is None else self.ingestion_auth_required
+
+    @property
+    def effective_allow_unassigned_ingestion(self) -> bool:
+        return (not self._is_production()) if self.allow_unassigned_ingestion is None else self.allow_unassigned_ingestion
+
+    @property
+    def effective_ui_cookie_secure(self) -> bool:
+        return self._is_production() if self.ui_cookie_secure is None else self.ui_cookie_secure
+
+    @property
+    def effective_csrf_enabled(self) -> bool:
+        return self._is_production() if self.csrf_enabled is None else self.csrf_enabled
+
+    @property
+    def effective_debug_endpoints_enabled(self) -> bool:
+        return (not self._is_production()) if self.debug_endpoints_enabled is None else self.debug_endpoints_enabled
+
+    def get_ingestion_allowed_origins(self) -> List[str]:
+        return [
+            origin.strip().rstrip("/")
+            for origin in self.ingestion_allowed_origins.split(",")
+            if origin.strip()
+        ]
+
+    def get_ui_allowed_origins(self) -> List[str]:
+        return [
+            origin.strip().rstrip("/")
+            for origin in self.ui_allowed_origins.split(",")
+            if origin.strip()
+        ]
+
+    def validate_security_policy(self) -> None:
+        """Fail fast when an explicitly production deployment is unsafe."""
+        if not self._is_production():
+            return
+
+        errors: List[str] = []
+        if not self.effective_ingestion_auth_required:
+            errors.append("INGESTION_AUTH_REQUIRED must be true in production")
+        if self.effective_allow_unassigned_ingestion:
+            errors.append("ALLOW_UNASSIGNED_INGESTION must be false in production")
+        if not self.effective_ui_cookie_secure:
+            errors.append("UI_COOKIE_SECURE must be true in production")
+        if not self.effective_csrf_enabled:
+            errors.append("CSRF_ENABLED must be true in production")
+        if not self.get_ingestion_allowed_origins():
+            errors.append("INGESTION_ALLOWED_ORIGINS must list trusted origins in production")
+        if "*" in self.get_ingestion_allowed_origins():
+            errors.append("INGESTION_ALLOWED_ORIGINS cannot include '*' in production")
+        if errors:
+            raise ValueError("Unsafe production Prism configuration: " + "; ".join(errors))
+
     def get_pr_labels(self) -> List[str]:
         """Parse PR labels from comma-separated string."""
         return [label.strip() for label in self.auto_pr_label.split(",") if label.strip()]
@@ -132,5 +204,6 @@ def get_settings() -> Settings:
         os.environ["TRUSTED_CA_BUNDLE"] = os.environ["PRISM_TRUSTED_CA_BUNDLE"]
 
     settings = Settings()
+    settings.validate_security_policy()
     settings.ensure_directories()
     return settings

@@ -112,7 +112,7 @@ class TelemetryLogResponse(BaseModel):
 
 class IncidentResponse(BaseModel):
     """Model for incident API responses."""
-    incident_id: str  # 4-character alphanumeric ID (e.g., A7CB)
+    incident_id: str  # Up to 8-character project-prefixed alphanumeric ID (e.g., ZOFFAT1X)
     app_name: str
     environment: str
     error_title: str
@@ -200,6 +200,6 @@ class IncidentResponse(BaseModel):
 
 class ApprovalRequest(BaseModel):
     """Model for fix approval request."""
-    incident_id: str  # 4-character alphanumeric ID (e.g., A7CB)
+    incident_id: str  # Up to 8-character project-prefixed alphanumeric ID (e.g., ZOFFAT1X)
     approved: bool
     comment: Optional[str] = None

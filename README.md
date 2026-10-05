@@ -31,8 +31,9 @@ Prism is an autonomous incident management system that ingests OpenTelemetry log
 7. [Quick Start](#quick-start)
 8. [Quality Gates](#quality-gates)
 9. [Configuration](#configuration)
-10. [API Reference](#api-reference)
-11. [Default Credentials](#default-credentials)
+10. [Production Security Baseline](#production-security-baseline)
+11. [API Reference](#api-reference)
+12. [Default Credentials](#default-credentials)
 
 ---
 
@@ -120,6 +121,17 @@ Each incident that meets the severity threshold (`HIGH` or `CRITICAL` by default
 
 **Post-approval path:** After the user approves, `run_post_approval_workflow()` in `agents/workflow.py` runs steps 8–11 sequentially. Steps 1–7 are **not** re-run.
 
+### Workflow Operations and Recovery
+
+Every full, post-approval, and operator recovery execution receives a durable `workflow_runs` record. Retryable nodes also emit bounded `workflow_step_events` (`started`, `failed`, `retrying`, and `succeeded`) so operators can distinguish an external integration failure from a stalled execution without persisting prompts, raw telemetry, source code, generated fixes, or credentials.
+
+- `GET /api/workflow-health` provides selected-project success rate, active runs, average completed duration, and retry count.
+- `GET /api/incidents/{id}/workflow-runs` provides newest-first execution history for an incident.
+- `GET /api/workflow-runs/{run_id}/events` provides chronological, tenant-scoped node events for one execution.
+- `POST /api/incidents/{id}/recover-post-approval` queues a recovery run only for an **approved** incident that has not already completed PR processing.
+
+Recovery is restricted to `admin` and `team_admin` users, requires a 3–500-character operator reason, honors the persistent 30-minute execution lease, is project-scoped, and records both an audit event and a recovery workflow run. Use it only after correcting the external blocker (for example, GitHub or Jira permissions). It resumes only post-approval work and never re-runs RCA, fix generation, or the approval decision.
+
 ---
 
 ## Project & Role Model
@@ -146,13 +158,9 @@ Admin
 
 ### Project Resolution
 
-When an OTLP log arrives, the ingestion API resolves the owning project using the authenticated ingestion context when available, otherwise by matching the log's `app_name` to a project:
-1. Exact match against project `app_names` list
-2. Match against the project's `repo_url` leaf name
-3. Match against `repo_mappings` configured in the project settings
-4. A narrowly scoped legacy fallback only when there is one unambiguous configured project
+When an OTLP log arrives with a valid project API key, the ingestion API resolves the owning project directly from that authenticated key. The resolved `project_id` is persisted on both the telemetry record and the incident.
 
-The resolved `project_id` is persisted on both the telemetry record and the incident. Duplicate detection is scoped to `(project_id, error_fingerprint)`, and every subsequent workflow action uses that stored owner rather than attempting to re-resolve a project.
+Local development may explicitly permit unauthenticated ingestion through `ALLOW_UNASSIGNED_INGESTION=true`; those records are stored with `project_id=None` and must not be treated as tenant-owned. When unassigned intake is disabled—including the production default—the request is rejected unless it supplies a valid project API key. Duplicate detection is scoped to `(project_id, error_fingerprint)`, and workflow processing uses the stored owner rather than attempting to re-resolve a project.
 
 ---
 
@@ -228,7 +236,6 @@ prism/
 ├── config/
 │   ├── settings.py                  # Pydantic settings (infrastructure only, no secrets)
 │   ├── prompts.yaml                 # LLM prompt templates
-│   ├── app_repo_mapping.yaml        # Static app-name → GitHub repo overrides
 │   └── otel-collector-config.yaml   # OpenTelemetry Collector config (otelcol-contrib 0.153.0)
 │
 ├── utils/
@@ -287,6 +294,56 @@ The suite uses an in-memory SQLite database and verifies the critical safety gua
 
 GitHub Actions runs the same compile and test gate for every pull request and every push to `main` (`.github/workflows/ci.yml`). Legacy scripts under `tools/` remain operational diagnostics and are intentionally excluded from automated pytest discovery.
 
+### Local Postman regression suite
+
+Prism includes a deterministic, credential-free Postman regression suite for local validation.
+
+1. Start the Prism UI and ingestion services on their configured local ports. The generated environment defaults to `http://127.0.0.1:8080` and `http://127.0.0.1:8000`.
+2. Seed synthetic local fixtures:
+
+   ```bat
+   py -3.14 scripts\seed_postman_data.py --reset
+   ```
+
+   This intentionally resets only local runtime database, authentication, and session data. Never run it against production.
+3. Import `postman/Prism.postman_collection.json` and `postman/Prism.local.postman_environment.json` into Postman.
+4. Select **Prism Local Synthetic**, then run **Prism Local Regression** in collection order.
+
+The suite validates authentication and CSRF handling, role and tenant isolation, project ingestion-key lifecycle, OTLP authentication boundaries, incident comments, workflow-history access, security-audit evidence, and CSV export. It uses synthetic `example.test` identities and no external-integration credentials.
+
+### Collector-mediated demo suite
+
+`postman/Prism.Collector.Demo.postman_collection.json` is a guided demonstration of the intended production telemetry route. Unlike the local regression suite, it sends OTLP payloads to the OpenTelemetry Collector rather than directly to Prism:
+
+```text
+Postman → OpenTelemetry Collector (:4318) → Prism Ingestion API (:8000) → Prism Dashboard (:8080)
+```
+
+1. Start the Prism UI and ingestion services.
+2. Seed the local demo identities, project, and project key:
+
+   ```bat
+   py -3.14 scripts\seed_postman_data.py --reset
+   ```
+
+3. Copy the seeded tenant-A `project_a_api_key` from `postman/Prism.local.postman_environment.json` and set it **only in the Collector process environment**:
+
+   ```bat
+   set PRISM_OTLP_EXPORT_API_KEY=prism_<seeded-project-a-key>
+   otelcol-contrib.exe --config config/otel-collector-config.yaml
+   ```
+
+4. Import `postman/Prism.Collector.Demo.postman_collection.json` and `postman/Prism.Collector.Demo.postman_environment.json`.
+5. Select **Prism Collector Demo (Local)** and run the requests in collection order.
+
+The demo sends one batch of 12 OTLP logs through the Collector: 10 unique `ERROR`/`FATAL` records that create incidents and demonstrate MuleSoft, Java, Python, Node.js, .NET, Go, Ruby, PHP, Rust, and Kotlin/JVM detection; plus one `WARN` and one `INFO` record that are persisted as telemetry without creating incidents. This distinction is intentional: Prism’s incident workflow begins at OTLP severity `ERROR` (17) and creates `HIGH` incidents; `FATAL` (21+) creates `CRITICAL` incidents, while lower-severity signals remain operational telemetry.
+
+The collection also forwards a trace and a metric through the Collector. Prism currently acknowledges these signals but does not persist or render their raw data. The final requests authenticate to the Dashboard and verify the collector-forwarded incidents are visible. Do not expect a real PR or Jira issue without valid per-project LLM, GitHub, and Jira integrations.
+
+### Observability support boundary
+
+`POST /v1/traces` and `POST /v1/metrics` currently validate and acknowledge OTLP payloads with summary statistics. Prism does **not** yet persist, correlate, or render trace or metric records in the dashboard. The `/traces` and `/metrics` pages clearly state this limitation; only telemetry logs and derived incident data are persisted.
+
 ### 2. Start the Ingestion API
 
 ```bash
@@ -310,7 +367,23 @@ The collector:
 - Forwards all signals to the **Prism Ingestion API** on `http://localhost:8000`
 - Exposes a health check on port **13133** (`http://localhost:13133`)
 
-You can also send logs directly to the Prism Ingestion API on port **8000** without running a collector.
+Development mode permits local unauthenticated ingestion for quick start. Production mode requires every ingestion request to supply a project API key:
+
+```bash
+-H "Authorization: Bearer <project-api-key>"
+```
+
+Configure the collector's outbound request headers with that key rather than exposing Prism's ingestion port directly to untrusted clients.
+
+#### Managing ingestion API keys
+
+Platform admins and team admins can manage only their authorized project's keys through the authenticated Dashboard API:
+
+- `POST /api/team-admin/api-keys` creates a key. The plaintext `prism_...` key is returned **once** in that response and must be placed immediately in the collector or API-gateway secret store.
+- `GET /api/team-admin/api-keys?project_id=PRJ-...` lists lifecycle metadata only: label, creation, expiry, last use, and revocation timestamps. Key values and digests are never returned.
+- `DELETE /api/team-admin/api-keys/{key_id}?project_id=PRJ-...` revokes a key without deleting its audit-relevant record.
+
+For rotation, create and deploy a replacement key, verify collector delivery, then revoke the prior key. Set an ISO-8601 `expires_at` when issuing short-lived credentials. Each successful ingestion authentication updates `last_used_at`; create, use, and revoke lifecycle events are retained in the security audit log.
 
 ### 4. Start the Dashboard UI
 
@@ -388,6 +461,12 @@ All settings below are optional overrides. The defaults shown are what the appli
 | `INGESTION_API_PORT` | `8000` | Ingestion API listen port. |
 | `OTLP_COLLECTOR_PORT` | `4318` | Port the OTLP HTTP collector listens on. |
 | `OTLP_ENDPOINT` | `http://localhost:4318/v1/logs` | OTLP endpoint used internally. |
+| `PRISM_ENVIRONMENT` | `development` | Runtime security profile. Set to `production` for deployed environments. |
+| `INGESTION_ALLOWED_ORIGINS` | local origins in development | Comma-separated browser origins permitted by CORS. **Required** in production; never use `*`. |
+| `INGESTION_AUTH_REQUIRED` | `false` development / `true` production | Require `Authorization: Bearer <project API key>` on all ingestion endpoints. Production rejects an insecure override. |
+| `ALLOW_UNASSIGNED_INGESTION` | `true` development / `false` production | Whether events without a resolved project may be accepted. Production rejects an insecure override. |
+| `MAX_INGESTION_BODY_BYTES` | `1048576` | Maximum declared ingestion request size in bytes. Requests above it return `413`. |
+| `INGESTION_RATE_LIMIT_PER_MINUTE` | `60` | Per-client in-process intake cap. Use an API gateway/load balancer for distributed enforcement. |
 
 #### Storage
 
@@ -441,6 +520,32 @@ All settings below are optional overrides. The defaults shown are what the appli
 | `LLM_CACHE_TTL_HOURS` | `24` | Time-to-live (hours) for cached LLM responses. |
 | `RATE_LIMIT_REQUESTS_PER_MINUTE` | `10` | Ingestion API rate limit per client. |
 
+## Production Security Baseline
+
+Prism’s production profile is intentionally **fail closed**. Start both services with explicit, reviewable environment settings:
+
+```bash
+PRISM_ENVIRONMENT=production
+INGESTION_ALLOWED_ORIGINS=https://prism.example.com
+INGESTION_AUTH_REQUIRED=true
+ALLOW_UNASSIGNED_INGESTION=false
+UI_COOKIE_SECURE=true
+CSRF_ENABLED=true
+DEBUG_ENDPOINTS_ENABLED=false
+INTEGRATION_SECRET_KEY=<durable-shared-fernet-key>
+```
+
+On startup, production configuration validation rejects missing ingestion origins and explicitly insecure authentication, tenant-assignment, secure-cookie, or CSRF overrides. This prevents a deployment from silently retaining local-development behavior.
+
+Operational requirements:
+
+1. Terminate TLS at a trusted reverse proxy or load balancer and expose only HTTPS publicly.
+2. Keep the UI, ingestion API, SQLite data directory, `auth_data.json`, and integration key file on private infrastructure with least-privilege filesystem access.
+3. Send OTLP through a managed collector/API gateway, inject a distinct project API key, set gateway body/rate limits, and rotate keys during scheduled maintenance. The app-level rate limiter is process-local by design.
+4. Do not publish `/debug/*` routes in production; Prism returns `404` for them under the production policy.
+5. Use a durable, externally managed `INTEGRATION_SECRET_KEY` for every process that must read encrypted configurations. Back up the key separately from the database and test recovery.
+6. Change the first-boot administrator password immediately and prevent the seeded defaults from being used in any internet-reachable deployment.
+
 ### First-Boot Admin Credentials
 
 The default admin account is seeded from `storage/auth_store.py` only on the **very first boot** (when `data/auth_data.json` does not yet exist). These can be overridden via environment variables before the first run:
@@ -453,17 +558,16 @@ The default admin account is seeded from `storage/auth_store.py` only on the **v
 
 Once `data/auth_data.json` exists these variables have no effect; use the Admin Dashboard to manage users.
 
-### `config/app_repo_mapping.yaml`
+### GitHub source-code resolution
 
-Provides a static fallback for mapping application names to GitHub repositories when the project's DB `repo_mappings` don't cover a particular app:
+Configure one GitHub organization and token in **Team Admin → Project Configuration → GitHub** for each client/project. Prism resolves source code in this order:
 
-```yaml
-app_mappings:
-  my-mule-app:
-    repo: my-org/my-mule-app
-    branch: main
-    description: "Order processing Mule application"
-```
+1. An explicit `github.repository`, repository, or GitHub URL carried in telemetry.
+2. The repository recorded for a registered application, including its telemetry aliases.
+3. An exact repository-name match in the configured GitHub organization.
+4. A best-effort repository-name match in that organization.
+
+This allows a client such as NTT Data to run MuleSoft, Python, Go, and other applications under one client/project without configuring every repository. Register an application when its telemetry identifier differs from the repository name, when it needs aliases, or when deterministic repository selection is required.
 
 ---
 
@@ -471,22 +575,23 @@ app_mappings:
 
 ### Ingestion API (:8000)
 
+Port **8000 is machine-ingestion-only**. In production, requests require a
+project API key (`Authorization: Bearer <project-api-key>`). Incident browsing,
+approvals, telemetry views, and all other operator actions are available only
+through the authenticated Dashboard UI on port 8080. Legacy management paths
+on the ingestion service return `404`.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Health check |
 | `POST` | `/v1/logs` | **Primary** OTLP log ingestion endpoint |
 | `POST` | `/v1/traces` | OTLP trace ingestion (acknowledged, not yet stored) |
 | `POST` | `/v1/metrics` | OTLP metrics ingestion (acknowledged, not yet stored) |
+| `POST` | `/v1/events` | CI/CD event ingestion endpoint |
 | `POST` | `/ingest/log` | Direct incident creation (legacy) |
 | `POST` | `/ingest/otlp` | Legacy OTLP endpoint (use `/v1/logs` instead) |
-| `GET` | `/incidents` | List incidents |
-| `GET` | `/incidents/{id}` | Get incident by ID |
-| `POST` | `/incidents/{id}/approve` | Approve or reject a fix |
-| `PATCH` | `/incidents/{id}` | Update incident fields |
-| `GET` | `/stats` | Aggregate incident statistics |
-| `GET` | `/api/logs` | List telemetry logs with filters |
-| `GET` | `/debug/last-requests` | Last 50 HTTP requests (diagnostics) |
-| `GET` | `/debug/incident/{id}/raw` | Raw incident + OTLP attributes |
+| `GET` | `/debug/last-requests` | Local diagnostics; unavailable in production |
+| `GET` | `/debug/incident/{id}/raw` | Local diagnostics; unavailable in production |
 
 ### Dashboard UI (:8080)
 
@@ -518,6 +623,7 @@ app_mappings:
 | `GET` | `/api/incidents/{id}` | Incident detail (JSON) |
 | `POST` | `/api/incidents/{id}/approve` | Approve or reject (SSE broadcast) |
 | `POST` | `/api/incidents/{id}/continue-post-approval` | Resume post-approval workflow |
+| `POST` | `/api/incidents/{id}/recover-post-approval` | Admin/team-admin audited recovery of an incomplete approved workflow |
 | `POST` | `/api/incidents/{id}/trigger` | Re-trigger full workflow (guarded) |
 | `POST` | `/api/incidents/{id}/regenerate-fix` | Re-generate fix with reviewer feedback |
 | `POST` | `/api/incidents/bulk-approve` | Bulk approve/reject (up to 100) |
@@ -526,12 +632,17 @@ app_mappings:
 | `GET` | `/api/incidents/export.csv` | Export incidents as CSV |
 | `GET` | `/api/analytics/trends` | Daily trend + MTTR stats |
 | `GET` | `/api/stats` | Aggregate stats (efficient SQL) |
+| `GET` | `/api/workflow-health` | Project-scoped workflow reliability summary (admin/team-admin) |
+| `GET` | `/api/incidents/{id}/workflow-runs` | Incident workflow execution history |
+| `GET` | `/api/workflow-runs/{run_id}/events` | Chronological workflow node operational evidence |
 | `GET` | `/events` | Server-Sent Events stream |
 | `POST` | `/api/switch-project` | Switch active project context |
 | `POST` | `/api/team-admin/integration/{type}` | Save integration config |
 | `POST` | `/api/team-admin/integration/{type}/test` | Test integration connectivity |
-| `POST` | `/api/team-admin/repo-mappings` | Save app→repo mappings |
 | `POST` | `/api/team-admin/runtime-config` | Save runtime configuration |
+| `GET` | `/api/team-admin/api-keys` | List redacted project ingestion-key metadata |
+| `POST` | `/api/team-admin/api-keys` | Issue a project ingestion key (plaintext returned once) |
+| `DELETE` | `/api/team-admin/api-keys/{key_id}` | Revoke a project ingestion key |
 | `POST` | `/api/admin/onboard-project` | Create project + Team Admin (API) |
 
 ---
@@ -574,13 +685,16 @@ The `AgentState` TypedDict (`agents/state.py`) carries all data through the Lang
 
 ## Database Schema Overview
 
-The SQLite database at `data/incidents.db` contains four tables:
+The SQLite database at `data/incidents.db` contains workflow, audit, and incident persistence tables:
 
 | Table | Description |
 |-------|-------------|
 | `incidents` | Core incident records with all workflow state, integration artefacts, and approval decisions |
 | `telemetry_logs` | Raw OTLP log records (independent of incident creation) |
-| `project_integration_configs` | Encrypted per-project integration credentials |
+| `project_integration_configs` | Encrypted per-project integration credentials and non-reversible ingestion API-key digests |
+| `security_audit_events` | Append-only security lifecycle events for API-key issuance, use, revocation, and privileged operator actions |
+| `workflow_runs` | Tenant-scoped execution lifecycle records for full, post-approval, and recovery workflows |
+| `workflow_step_events` | Append-only bounded operational evidence for each workflow node attempt |
 | `incident_comments` | Comment threads on incidents |
 
 Schema is auto-created by `init_database()` on startup. Column migrations for new fields are applied automatically via `PRAGMA table_info` checks in `storage/database.py`.

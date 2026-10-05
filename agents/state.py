@@ -136,6 +136,7 @@ class AgentState(TypedDict):
     
     # Workflow control
     current_node: Optional[str]  # Current processing node
+    workflow_run_id: Optional[str]  # Durable operational execution correlation ID
     workflow_completed_steps: Optional[List[str]]  # List of completed workflow steps
     workflow_progress_pct: Optional[float]  # Workflow progress percentage (0.0 to 1.0)
     error_message: Optional[str]  # Error if workflow fails
@@ -270,6 +271,7 @@ def create_initial_state(
         
         # Workflow control
         current_node=None,
+        workflow_run_id=None,
         workflow_completed_steps=[],
         workflow_progress_pct=0.0,
         error_message=None,

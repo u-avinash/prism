@@ -34,8 +34,7 @@ class GitHubClient:
 
     All credentials are loaded from the per-project DB config (stored encrypted).
     Repositories are resolved automatically from the configured GitHub
-    organization and the incident application name. Legacy DB mappings remain
-    supported only for existing installations.
+    organization and the incident application name.
     No fallback to environment variables, settings.py, or YAML files.
     """
 
@@ -82,16 +81,19 @@ class GitHubClient:
             logger.warning("Failed to load project GitHub config for %s: %s", project_id, exc)
             return {}
 
-    def _get_repo_mappings(self) -> dict:
-        """Return the project's app→repo mapping from DB."""
+    def _get_registered_application(self, identifier: str) -> Optional[dict]:
+        """Resolve a first-class registered application for this project."""
         if not self.project_id:
-            return {}
+            return None
         try:
-            from storage.auth_store import get_app_repo_mapping
-            return get_app_repo_mapping(self.project_id)
+            from storage.auth_store import get_project_application
+            return get_project_application(self.project_id, identifier)
         except Exception as exc:
-            logger.warning("Failed to load repo mappings for project %s: %s", self.project_id, exc)
-            return {}
+            logger.warning(
+                "Failed to resolve registered application '%s' for project %s: %s",
+                identifier, self.project_id, exc,
+            )
+            return None
 
     # ── Repo resolution ───────────────────────────────────────────────────────
 
@@ -147,10 +149,11 @@ class GitHubClient:
         Resolve the GitHub repository full name for an application.
 
         Resolution order:
-          1. Search the configured GitHub organisation by application name
-          2. Explicit GitHub URL patterns in the log text
-          3. Legacy project's DB repo_mappings (exact match, then case-insensitive)
-          4. If nothing found: raise ValueError with source-code configuration guidance
+          1. Explicit GitHub repository identifier/URL in telemetry or logs
+          2. First-class registered application repository or alias
+          3. Exact repository-name match in the configured GitHub organisation
+          4. Fuzzy organization match (last resort)
+          5. If nothing found: raise ValueError with source-code configuration guidance
         """
         app_name_norm = (app_name or "").strip()
         if not app_name_norm:
@@ -158,10 +161,36 @@ class GitHubClient:
                 "Cannot resolve a GitHub repository because the incident has no application name."
             )
 
-        # ── 1. Search the configured organisation (primary source) ────────────
-        # This is the supported Source Code Configuration workflow. A GitHub
-        # token with access to the organisation's repositories is sufficient;
-        # no per-application mapping is required in the UI.
+        # ── 1. Explicit repository identifiers in telemetry/logs ──────────────
+        # A fully qualified owner/repo value is deterministic and should always
+        # take precedence over naming heuristics. Accept URLs and `github.repository`
+        # style values serialized by OTLP exporters.
+        for pattern in (
+            r"(?:github\.repository|repository|repo(?:_full_name)?)\s*[=:]\s*[\"']?([^\s\"']+/[^\s\"',}]+)",
+            r"github\.com[:/]([^/\s]+/[^/\s]+)",
+            r"git@github\.com:([^/\s]+/[^/\s]+)",
+        ):
+            match = re.search(pattern, log_text or "", re.IGNORECASE)
+            if match:
+                repo_full_name = self._clean_repo_full_name(match.group(1))
+                if self._is_full_repo_name(repo_full_name):
+                    logger.info("Repo resolved from explicit telemetry/log identifier: %s", repo_full_name)
+                    return repo_full_name
+
+        # ── 2. Registered application metadata ───────────────────────────────
+        application = self._get_registered_application(app_name_norm)
+        if application:
+            registered_repo = self._clean_repo_full_name(application.get("repository"))
+            if self._is_full_repo_name(registered_repo):
+                logger.info(
+                    "Repo resolved from registered application '%s': %s",
+                    application.get("name"), registered_repo,
+                )
+                return registered_repo
+
+        # ── 3. Search the configured organisation ─────────────────────────────
+        # One org-scoped token supports repository discovery without configuring
+        # every repo when telemetry names are aligned with repository names.
         if self.org:
             try:
                 org = self.client.get_organization(self.org)
@@ -182,74 +211,6 @@ class GitHubClient:
                         return self._clean_repo_full_name(repo.full_name)
             except Exception as exc:
                 logger.warning("GitHub organization search failed for '%s': %s", self.org, exc)
-
-        # ── 2. Explicit GitHub URL patterns in log text ───────────────────────
-        for pattern in (
-            r"github\.com[:/]([^/\s]+/[^/\s]+)",
-            r"git@github\.com:([^/\s]+/[^/\s]+)",
-        ):
-            match = re.search(pattern, log_text, re.IGNORECASE)
-            if match:
-                repo_full_name = self._clean_repo_full_name(match.group(1))
-                if self._is_full_repo_name(repo_full_name):
-                    logger.info("Repo extracted from log URL pattern: %s", repo_full_name)
-                    return repo_full_name
-
-        # ── 3. Legacy DB repo mappings ────────────────────────────────────────
-        mappings = self._get_repo_mappings()
-        if mappings:
-            checked_keys: set[str] = set()
-
-            def _resolve_mapping(mapping_key: str, mapping_value: dict, case_insensitive: bool = False) -> Optional[str]:
-                repo_full_name = self._clean_repo_full_name(mapping_value.get("repo", ""))
-                if self._is_full_repo_name(repo_full_name):
-                    if case_insensitive:
-                        logger.info(
-                            "Repo resolved from DB mapping (case-insensitive): %s → %s",
-                            app_name_norm, repo_full_name,
-                        )
-                    else:
-                        logger.info("Repo resolved from DB mapping: %s → %s", app_name_norm, repo_full_name)
-                    return repo_full_name
-
-                derived_repo = self._derive_repo_from_org_only_mapping(repo_full_name, app_name_norm)
-                if self._is_full_repo_name(derived_repo):
-                    logger.info(
-                        "Repo derived from org-only DB mapping: %s → %s",
-                        app_name_norm, derived_repo,
-                    )
-                    return derived_repo
-
-                if repo_full_name:
-                    if case_insensitive:
-                        logger.warning(
-                            "Repo mapping for app '%s' (matched by key '%s') is not a full owner/repo value: %s",
-                            app_name_norm, mapping_key, repo_full_name,
-                        )
-                    else:
-                        logger.warning(
-                            "Repo mapping for app '%s' is not a full owner/repo value: %s",
-                            app_name_norm, repo_full_name,
-                        )
-                return None
-
-            # Exact match
-            if app_name_norm in mappings:
-                checked_keys.add(app_name_norm.lower())
-                resolved_repo = _resolve_mapping(app_name_norm, mappings[app_name_norm])
-                if resolved_repo:
-                    return resolved_repo
-
-            # Case-insensitive match
-            app_lower = app_name_norm.lower()
-            if app_lower not in checked_keys:
-                for key, val in mappings.items():
-                    if (key or "").strip().lower() == app_lower:
-                        checked_keys.add(app_lower)
-                        resolved_repo = _resolve_mapping(key, val, case_insensitive=True)
-                        if resolved_repo:
-                            return resolved_repo
-                        break
 
         # ── 4. No repository found ────────────────────────────────────────────
         raise ValueError(

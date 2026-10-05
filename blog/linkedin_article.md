@@ -1,145 +1,78 @@
-# I Built an AI System That Responds to Production Incidents Automatically — Here's What I Learned
+# I Built an AI-Assisted Incident Workflow That Keeps Humans in Control
 
-### *How an 11-step LangGraph agentic workflow goes from a raw error log to a GitHub Pull Request — with one human approval in between*
+### *How Prism turns OTLP error logs into governed, reviewable engineering actions with LangGraph*
 
 **By Upadhyayula Avinash**
 
 ---
 
-I've been in enough 3am incident calls to recognize the pattern.
+Production incident response often begins with repeatable work: interpret the error, find the relevant code, understand the deployment context, draft a fix, document it, and connect the outcome to the team’s Jira, GitHub, and notification tools.
 
-Someone gets paged. They open their laptop. They stare at logs for 20 minutes. They find the file, trace the stack, understand the cause. They write a fix. They open a Jira ticket, create a branch, push a PR, ping a colleague for review. They go back to sleep at 4am.
+That work still needs engineering judgment. But much of the preparation can be automated.
 
-The next morning, with fresh eyes, the uncomfortable truth surfaces: almost everything that happened in those 90 minutes was *mechanical*. Predictable. Repeatable. The kind of work that, in any other domain, we'd have automated years ago.
+I built **Prism**, an open-source AI-assisted incident-management platform, to connect observability signals to a structured engineering response—without allowing an AI model to decide whether code should be delivered.
 
-So I built **Prism** — an autonomous AI incident management platform that handles that mechanical work, and then pauses to ask a human one question: *should we actually ship this fix?*
+## What Prism does
 
----
+Prism accepts OpenTelemetry (OTLP) logs directly or through an OpenTelemetry Collector. For qualifying error signals, it:
 
-## What Prism Does
+1. Persists the telemetry and resolves the owning project.
+2. Deduplicates repeated errors with project-scoped SimHash fingerprints.
+3. Assesses severity and starts a stateful LangGraph workflow for qualifying incidents.
+4. Generates an AI-assisted Root Cause Analysis using available GitHub code and MuleSoft/Anypoint runtime context.
+5. Produces a proposed fix, test suggestion, quality reflection, downloadable patch, and RCA PDF.
+6. Pauses for a human reviewer.
+7. After explicit approval, can send notifications, create a Jira issue, and create a GitHub branch and Pull Request.
 
-Prism connects to your application via OpenTelemetry — the open standard for observability data that most modern stacks now support. When your service emits an error log, Prism catches it, deduplicates it (so one bug doesn't generate 500 Jira tickets), and classifies it by severity.
+The objective is not unattended remediation. It is a more consistent evidence package and a shorter path from an error signal to an informed engineering decision.
 
-For serious incidents — HIGH or CRITICAL — it kicks off an 11-step AI workflow:
+## The approval gate is the design center
 
-| # | What Happens |
-|---|---|
-| 1–2 | Severity classification + SLA deadline set |
-| 3 | AI Root Cause Analysis — using the *actual source file* fetched live from GitHub, not just the error message |
-| 4 | Language-aware code fix with plain-English explanation |
-| 5 | Unit test suggestion that would have caught the bug |
-| 6 | PDF report (downloadable before approval — useful for compliance) |
-| 7 | Quality scoring: correctness, safety, code quality, completeness (each 0–10) |
-| 8 | Unified `.patch` file — downloadable and locally testable before approving |
-| 9 | ⏸️ **Workflow pauses — human review and approval** |
-| 10–11 | Post-approval: Slack/Teams alert, Jira ticket, GitHub branch + PR, Jira DevInfo sync |
+The workflow pauses before Jira and GitHub delivery actions. Reviewers can inspect:
 
-After one approval click, everything in steps 10–11 happens automatically. The full traceability chain — from production error to committed code change — is visible in both the Prism dashboard and the Jira Development panel.
+- Root-cause analysis and confidence information
+- Proposed code change and explanation
+- Quality evidence for correctness, safety, code quality, and completeness
+- A downloadable `.patch` file to validate locally
+- An RCA PDF, comments, and reviewer feedback
 
-**[SCREENSHOT: The Prism dashboard showing a live incident with the 11-step workflow progress and an AI-generated RCA]**
+A reviewer can approve, reject, or request a regenerated fix with feedback. Prism does not deploy code to production. The platform prepares and routes work; accountable engineers retain control of the decision.
 
-> **On MTTR:** Most of the Mean Time to Resolution in a typical incident is spent on the research phase — finding the cause and drafting a fix. Prism compresses that from 30–60 minutes of manual work to a sub-2-minute automated pipeline. Engineers spend their time on what actually requires judgment: *is this fix correct enough to ship?*
+## Security and operations are part of the workflow
 
----
+Recent work focused on making the operational boundary more explicit:
 
-## The Design Decision That Matters Most
+- **Project API keys for ingestion:** In production, ingestion requests require `Authorization: Bearer <project-api-key>`. The authenticated key resolves project ownership directly.
+- **Fail-closed production configuration:** The production profile rejects insecure authentication, unassigned-ingestion, CORS, secure-cookie, and CSRF settings.
+- **Per-project isolation:** Incidents, telemetry, workflow history, access checks, and integration configuration are project scoped.
+- **Encrypted integration secrets:** LLM, GitHub, Jira, notification, and Anypoint credentials are encrypted at rest. Ingestion keys are held as non-reversible digests and returned only once when issued.
+- **Workflow execution evidence:** Durable workflow-run history and bounded node-event records show whether work is active, retrying, failed, or complete without duplicating sensitive prompt, source, or generated-fix data.
+- **Audited recovery:** Admins and Team Admins can resume incomplete approved post-approval work with a required reason. Recovery honors the execution lease and never repeats RCA generation, fix generation, or the approval decision.
 
-Every conversation about AI autonomy eventually hits the same question: *how much do you trust it?*
+## Technology choices
 
-My answer with Prism is precise: **trust it to do the research, not to make the call.**
+Prism is built with Python, FastAPI, LangGraph, SQLAlchemy/SQLite, Jinja2, Server-Sent Events, OpenTelemetry, and pluggable LLM providers including OpenAI, Anthropic, Azure OpenAI, Gemini, Groq, and Ollama.
 
-Before any code is written to the repository, the workflow pauses. The reviewer sees:
+The architecture is intentionally straightforward for a single-instance deployment: two FastAPI services, SQLite persistence, filesystem artifacts, and optional collector-mediated OTLP delivery. Teams with high availability or multi-instance requirements should evaluate a networked database, managed gateway, and deployment architecture suited to their environment.
 
-- The full AI-generated Root Cause Analysis
-- The proposed code change as a diff
-- Quality scores with specific concerns flagged
-- A downloadable `.patch` file they can apply locally and test before deciding
-- A PDF report for documentation or compliance needs
+## Clear current boundary
 
-**What if the fix is wrong?** The reviewer rejects it with written feedback. That feedback gets injected into the fix-generation prompt, and the system regenerates the fix — with the reviewer's context incorporated. This reject-and-regenerate loop continues until the reviewer is satisfied, or they escalate the incident manually.
+Prism persists logs and the incidents derived from them. Its OTLP trace and metric endpoints currently validate and acknowledge payloads but do not persist, correlate, or render live trace or metric data. The UI states this limitation explicitly rather than presenting sample data as production observability.
 
-The AI does the 45-minute research work. The engineer does a 90-second review. That's the right division of labor.
+## Getting started responsibly
 
-This isn't a technical limitation — it's a deliberate architectural choice. Autonomous code commits without human review introduce a category of risk that no quality score can fully mitigate. The approval gate is load-bearing, and I'm intentional about keeping it that way.
+The repository includes a credential-free local Postman regression suite for authentication, tenant isolation, ingestion-key lifecycle, OTLP boundaries, workflow-history access, security-audit evidence, and CSV export.
 
-**[SCREENSHOT: Approval gate — Approve / Reject buttons with reviewer notes textarea, quality scores, and downloadable patch link]**
+For production, Prism should be deployed behind trusted TLS infrastructure. OTLP should be routed through a collector or API gateway that injects a per-project key and applies gateway-level limits. The README includes the production security baseline and a collector-mediated demonstration flow.
 
----
+The core principle remains simple:
 
-## Three Things I Learned Building It
+> **AI prepares; humans decide; the system executes approved work.**
 
-### 1. Agentic workflows need graceful failure paths more than they need success paths
-
-The happy path is easy to design. The hard part is everything else: the LLM times out, the GitHub API rate-limits you, the fix generation fails on retry 2. What happens then?
-
-In Prism, every node that calls an LLM is either *retryable* (automatic retries with exponential delay, up to 2 attempts) or *safe-defaulting* (uses fallback values and never blocks the pipeline). When retries are exhausted, the workflow routes directly to a clean `FAILED` state — no hanging processes, no partial records, no silent corruption.
-
-Building resilience into an AI workflow is the same discipline as building resilience into a distributed system: assume failure, design for it explicitly, and make sure every failure mode produces a clean, visible outcome.
-
-### 2. LLM prompts are code — treat them that way
-
-Prism's prompts live in `config/prompts.yaml`, versioned alongside the application code. The RCA prompt includes the raw log, the full stack trace, the actual source file content fetched from GitHub, and the runtime environment context (CloudHub deployment info for MuleSoft applications). The fix prompt includes all of that plus the RCA output.
-
-The difference between a vague, generic RCA and a precise, actionable one is almost entirely about the quality of context you give the model. Prompt engineering is engineering. Version it, review it, and iterate on it like any other critical system component.
-
-### 3. Human-in-the-loop is a feature, not a constraint
-
-Early in the design I considered making the approval gate optional — a setting that confident teams could disable for low-risk fixes. I'm glad I didn't build it that way.
-
-The approval gate is also where engineers *learn from the system*. They read the RCA, inspect the quality scores, see how the AI reasoned about the fix. That feedback loop — engineer reviewing AI output — builds understanding and trust over time. Teams that skip it are also skipping the part that makes the system's outputs get better.
-
----
-
-## The Stack and the Enterprise Angle
-
-Prism is built entirely in Python, runs with zero configuration out of the box, and is designed to be self-hostable:
-
-- **FastAPI** for the ingestion API and the real-time dashboard
-- **LangGraph** for the stateful agentic workflow
-- **SQLite** for persistence (straightforward to migrate to Postgres for scale)
-- **Multi-LLM**: OpenAI, Anthropic Claude, Azure OpenAI, Google Gemini, Groq, Ollama
-- **Integrations**: GitHub, Jira, Slack, Microsoft Teams, MuleSoft Anypoint Platform
-
-For enterprise teams, the multi-tenant model matters: every project has its own independently encrypted credentials — LLM API keys, GitHub tokens, Jira credentials, Slack webhooks. AES-encrypted (Fernet) at rest, with the master key separate from the database. Platform administrators cannot see other teams' secrets. Teams operate in full isolation.
-
-The platform ships with three roles — Admin, Team Admin, and User — each scoped appropriately. Team Admins configure integrations and manage their team. Admins manage the platform. Users review and approve incidents.
-
-**[SCREENSHOT: The Team Admin integration settings page — LLM provider selection, GitHub/Jira configuration, Slack webhook setup]**
-
----
-
-## Try It in Under 5 Minutes
-
-```bash
-git clone https://github.com/u-avinash/prism
-cd prism
-pip install -r requirements.txt
-uvicorn ingestion.api:app --port 8000 &
-uvicorn ui.server:app --port 8080
-```
-
-Open `http://localhost:8080`, log in (`admin` / `ChangeMe123!`), create a project, add your LLM API key, and send a test OTLP error log. Within 60–120 seconds you'll see the full 11-step workflow run in real-time — RCA generated, fix proposed, quality scores calculated, patch file ready for download — all waiting for one approval click.
-
-No `.env` file needed. No external services required to get started.
-
-**Requirements:** Python 3.11+
-
----
-
-## A Final Thought
-
-The teams that will get the most value from AI over the next few years won't be the ones who automate the most decisions. They'll be the ones who identify exactly which decisions *should stay with humans* — and build tooling that makes those human decisions faster, better-informed, and easier to act on.
-
-Prism is my attempt at that for incident response. The AI handles the mechanical 45-minute research job. The engineer handles the 90-second judgment call. That's a trade worth making.
-
-Full source code is open at **[github.com/u-avinash/prism](https://github.com/u-avinash/prism)**.
-
-If you're working on something similar, have built your own AIOps tooling, or have strong opinions about where the human-AI boundary should sit in incident response — I'd genuinely like to hear your perspective. Drop a comment below.
+Full source: [github.com/u-avinash/prism](https://github.com/u-avinash/prism)
 
 ---
 
 *Upadhyayula Avinash — Software Engineer | AI Systems | Platform Engineering*
 
-*GitHub: [github.com/u-avinash/prism](https://github.com/u-avinash/prism)*
-
-*#AI #DevOps #SRE #LangGraph #OpenTelemetry #IncidentManagement #AIOps #Python #SoftwareEngineering #MLOps*
+*#AI #DevOps #SRE #LangGraph #OpenTelemetry #IncidentManagement #AIOps #Python*

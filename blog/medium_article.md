@@ -6,7 +6,7 @@
 
 ---
 
-> **TL;DR:** Prism is an open-source Python platform that ingests OpenTelemetry error logs, runs an 11-step LangGraph agentic workflow (RCA → code fix → quality scoring → patch file → PDF), pauses for a single human approval, then automatically creates the Jira ticket and GitHub PR. Zero config. Pluggable LLM. Multi-tenant. [github.com/u-avinash/prism](https://github.com/u-avinash/prism)
+> **TL;DR:** Prism is an open-source Python platform that ingests OpenTelemetry error logs, runs a LangGraph workflow (RCA → code fix → quality scoring → patch file → PDF), pauses for human approval, then can create a Jira ticket and GitHub PR. It supports project-scoped configuration, pluggable LLM providers, secure production ingestion, and auditable workflow recovery. [github.com/u-avinash/prism](https://github.com/u-avinash/prism)
 
 ---
 
@@ -22,7 +22,7 @@ Mechanical processes can be automated. That's the idea behind **Prism**.
 
 ## What Prism Does
 
-Prism is an autonomous AI incident management platform. It sits as an OTLP/HTTP endpoint between your application and your engineers. When your service emits an error log, Prism:
+Prism is an AI-assisted incident-management platform. It accepts OTLP/HTTP telemetry from applications or an OpenTelemetry Collector and turns qualifying errors into a governed engineering workflow. When a service emits an error log, Prism:
 
 1. Receives and parses the OTLP log record
 2. Deduplicates it using SimHash fingerprinting
@@ -31,9 +31,9 @@ Prism is an autonomous AI incident management platform. It sits as an OTLP/HTTP 
 5. **Pauses and asks a human to approve**
 6. After approval — creates the Jira ticket, commits the fix to a new branch, and opens a GitHub Pull Request
 
-The entire pipeline from error ingestion to PR-ready fix happens autonomously. The human makes exactly one decision: approve or reject.
+Prism automates preparation of the PR-ready evidence package; a human remains responsible for approval. Post-approval delivery requires configured integrations and does not deploy code to production.
 
-> **On MTTR:** Engineering teams spend a disproportionate amount of their Mean Time to Resolution (MTTR) on the research phase — finding the root cause and drafting a fix. Prism compresses that phase from 30–60 minutes of manual work to a sub-2-minute automated pipeline, leaving humans to spend their time on the only part that actually requires judgment: *is this fix correct enough to ship?*
+> **On operational outcomes:** Prism is designed to reduce the manual research and drafting work that contributes to incident resolution time. Actual MTTR and cost impact depend on the deployment, integrations, service complexity, and reviewer process, and should be measured in each environment.
 
 ---
 
@@ -71,13 +71,14 @@ Prism runs as two FastAPI services:
 │  • Live workflow progress                               │
 │  • Approve / reject with reviewer notes                 │
 │  • Download patch / PDF before deciding                 │
-│  • Observability: traces, metrics, logs, audit trail    │
+│  • Telemetry logs, audit evidence, workflow history     │
+│  • Traces/metrics currently acknowledged, not stored     │
 └─────────────────────────────────────────────────────────┘
 ```
 
 **[SCREENSHOT: Incident dashboard — live list with severity badges and workflow status indicators]**
 
-The backbone is a **LangGraph `StateGraph`** — a stateful directed graph that carries an `AgentState` TypedDict through each step. Every piece of data — the raw log, the RCA text, the proposed fix, quality scores, Jira URL, PR number — lives in this shared state object and is persisted to SQLite at each step.
+The backbone is a **LangGraph `StateGraph`** that carries an `AgentState` TypedDict through the workflow. Incident state and artefact references are persisted to SQLite. Separate `workflow_runs` and bounded `workflow_step_events` records provide operational execution history without copying prompts, raw source code, generated fixes, raw telemetry, or credentials into node-event evidence.
 
 > **Primary target stack:** Prism was originally designed for **MuleSoft / Anypoint Platform** applications, integrating with the Anypoint Runtime Manager API to pull live CloudHub/ARM deployment context into the RCA. It works with any stack that can emit standard OTLP-formatted logs.
 
@@ -215,7 +216,7 @@ Prism uses **SimHash fingerprinting** on the error message and stack trace. Inco
 
 AI-generated code fixes are good — but not perfect. The quality scoring step (Step 7) is honest about this: scores below a threshold surface a warning to the reviewer. The patch download (Step 8) means the reviewer can verify the fix works before approving.
 
-The system is designed so that a reviewer who spends 90 seconds reading the RCA, glancing at the quality scores, and skimming the diff can make a confident, informed decision. The AI does the 45-minute research work; the human does the 90-second judgment call.
+The system is designed to give a reviewer the information needed for an informed decision. Review time and the value of AI-assisted research vary by incident, codebase, integration quality, and team process.
 
 ### Pluggable Multi-Provider LLM
 
@@ -289,52 +290,33 @@ Prism's differentiator is the **end-to-end pipeline**: from raw production log t
 
 ---
 
-## Try It in 5 Minutes
+## Run Locally, Deploy Deliberately
 
 **Prerequisites:** Python 3.11+
 
 ```bash
-# Clone and install
 git clone https://github.com/u-avinash/prism
 cd prism
 pip install -r requirements.txt
-
-# Start both servers
-uvicorn ingestion.api:app --host 0.0.0.0 --port 8000 --reload &
-uvicorn ui.server:app --host 0.0.0.0 --port 8080 --reload
+uvicorn ingestion.api:app --host 127.0.0.1 --port 8000
+uvicorn ui.server:app --host 127.0.0.1 --port 8080
 ```
 
-Open `http://localhost:8080`, log in (`admin` / `ChangeMe123!`), create a project, and add your LLM API key in the Team Admin settings.
+For deterministic local validation, use the repository’s synthetic Postman fixtures:
 
-Then send a test error:
-
-```bash
-curl -X POST http://localhost:8000/v1/logs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "resourceLogs": [{
-      "resource": {"attributes": [
-        {"key": "service.name", "value": {"stringValue": "order-service"}},
-        {"key": "deployment.environment", "value": {"stringValue": "production"}}
-      ]},
-      "scopeLogs": [{
-        "logRecords": [{
-          "severityNumber": 17,
-          "body": {"stringValue": "NullPointerException in OrderService.processOrder at line 142"},
-          "attributes": []
-        }]
-      }]
-    }]
-  }'
+```bat
+py -3.14 scripts\seed_postman_data.py --reset
 ```
 
-Within 60–120 seconds (depending on your LLM provider's latency) you'll see the 11 steps complete in the dashboard — RCA, proposed fix with quality scores, a downloadable patch file, and a PDF report — all waiting for your single approval click.
+The local suite is credential-free and exercises authentication, tenant isolation, ingestion-key lifecycle, OTLP boundaries, workflow history, audit evidence, and CSV export. It intentionally resets local runtime data only.
+
+In production, Prism fails closed: configure explicit permitted origins, secure cookies, CSRF, a durable integration-secret key, and project API-key authentication. Route OTLP through a trusted collector or API gateway that injects `Authorization: Bearer <project-api-key>` rather than exposing the ingestion port to untrusted clients. See the README’s **Production Security Baseline** and **Collector-mediated demo suite** for the complete configuration and demo steps.
 
 ---
 
 ## What's Next
 
-Prism is functional and production-tested, but there's a lot of interesting ground ahead:
+Prism has an implemented local validation suite and production security baseline; production deployment outcomes still require environment-specific verification. There is also meaningful ground ahead:
 
 - **Vector similarity search** on historical incidents to surface relevant past fixes during RCA generation
 - **Multi-file fix generation** for bugs that require coordinated changes across services

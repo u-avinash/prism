@@ -160,7 +160,7 @@ def test_workflow():
     incidents_with_repo = sum(1 for i in incidents if check_incident_details(db, i.incident_id)['repo_name'])
     
     print(f"Incidents with GitHub code fetched: {incidents_with_code}/{len(incidents)}")
-    print(f"Incidents with repository mapping: {incidents_with_repo}/{len(incidents)}")
+    print(f"Incidents with resolved repository: {incidents_with_repo}/{len(incidents)}")
     
     if incidents_with_code < len(incidents):
         print("\n[WARNING] Some incidents missing GitHub code!")
@@ -168,7 +168,7 @@ def test_workflow():
         print("\n   Possible causes:")
         print("   1. GitHub repos don't exist yet (run: python scripts/create_sample_repos.py)")
         print("   2. Files don't exist in repos")
-        print("   3. App name doesn't match config/app_repo_mapping.yaml")
+        print("   3. Telemetry app name does not match a registered application alias or accessible repository")
     
     # Next Steps
     print_section("NEXT STEPS")

@@ -1,0 +1,35 @@
+1
+00:00:00,000 --> 00:00:20,000
+Governed AI-assisted incident response
+
+2
+00:00:20,000 --> 00:00:50,000
+AI prepares evidence. Humans authorize change.
+
+3
+00:00:50,000 --> 00:01:25,000
+Approval is the control point
+
+4
+00:01:25,000 --> 00:02:05,000
+Project-scoped visibility and deduplicated incidents
+
+5
+00:02:05,000 --> 00:02:55,000
+Inspectable RCA, fix, tests, patch, and quality evidence
+
+6
+00:02:55,000 --> 00:03:35,000
+Explicit approval before Jira or GitHub automation
+
+7
+00:03:35,000 --> 00:04:05,000
+Secure intake • scoped access • encrypted secrets • audit evidence
+
+8
+00:04:05,000 --> 00:04:20,000
+Deployable foundation with a deliberate enterprise path
+
+9
+00:04:20,000 --> 00:04:30,000
+Signal → Reason → Approve → Deliver

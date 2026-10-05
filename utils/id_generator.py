@@ -9,64 +9,85 @@
 
   Author   : Upadhyayula Avinash
   GitHub   : https://github.com/u-avinash
-  LinkedIn : https://www.linkedin.com/in/avinash-upadhyayula/
+  LinkedIn : https://www.linkedin.com/in/avinash
   Email    : uavinash.csit@gmail.com
 
   Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
 """
-"""Generate unique alphanumeric incident IDs."""
-import random
+"""Generate unique, project-aware alphanumeric incident IDs."""
+
+import secrets
 import string
-from typing import Set
+from typing import Optional, Set
+
+MAX_INCIDENT_ID_LENGTH = 8
+MAX_PROJECT_PREFIX_LENGTH = 4
+_ALPHANUMERIC_CHARACTERS = string.ascii_uppercase + string.digits
 
 
-def generate_incident_id(existing_ids: Set[str] = None) -> str:
+def _project_prefix(project_name: Optional[str]) -> str:
+    """Return up to four uppercase alphanumeric characters from a project name."""
+    if not isinstance(project_name, str):
+        return ""
+
+    normalized = "".join(
+        character for character in project_name.upper() if character.isalnum()
+    )
+    return normalized[:MAX_PROJECT_PREFIX_LENGTH]
+
+
+def generate_incident_id(
+    existing_ids: Optional[Set[str]] = None,
+    project_name: Optional[str] = None,
+) -> str:
     """
-    Generate a unique 4-character alphanumeric incident ID in uppercase.
-    
-    Format: 4 characters using A-Z and 0-9 (e.g., A7CB, Z9XY, 1K2M)
-    
+    Generate a unique, non-sequential uppercase alphanumeric incident ID.
+
+    IDs are at most eight characters. When a project name is supplied, its first
+    four uppercase alphanumeric characters form the prefix and the remaining
+    characters are cryptographically random. For example, ``Zoff Ordering``
+    produces IDs such as ``ZOFFAT1X``. Unassigned or legacy incidents receive
+    an eight-character random identifier.
+
     Args:
-        existing_ids: Set of existing IDs to avoid collisions
-        
+        existing_ids: Existing incident IDs to avoid collisions with.
+        project_name: Optional project name used to derive the readable prefix.
+
     Returns:
-        str: A unique 4-character uppercase alphanumeric ID
+        A unique uppercase alphanumeric incident ID with a maximum length of 8.
+
+    Raises:
+        ValueError: If a unique ID cannot be generated after repeated attempts.
     """
-    if existing_ids is None:
-        existing_ids = set()
-    
-    # Characters to use: A-Z and 0-9 (36 possible characters)
-    # Total combinations: 36^4 = 1,679,616 possible IDs
-    chars = string.ascii_uppercase + string.digits
-    
-    # Try up to 100 times to generate a unique ID (should rarely need more than 1)
-    max_attempts = 100
-    for _ in range(max_attempts):
-        incident_id = ''.join(random.choices(chars, k=4))
-        
+    existing_ids = existing_ids or set()
+    prefix = _project_prefix(project_name)
+    suffix_length = MAX_INCIDENT_ID_LENGTH - len(prefix)
+
+    for _ in range(100):
+        suffix = "".join(
+            secrets.choice(_ALPHANUMERIC_CHARACTERS) for _ in range(suffix_length)
+        )
+        incident_id = f"{prefix}{suffix}"
+
         if incident_id not in existing_ids:
             return incident_id
-    
-    # If we somehow exhaust attempts, raise an error
-    raise ValueError("Failed to generate unique incident ID after maximum attempts")
+
+    raise ValueError("Failed to generate a unique incident ID after maximum attempts")
 
 
 def validate_incident_id(incident_id: str) -> bool:
     """
-    Validate that an incident ID matches the expected format.
-    
-    Args:
-        incident_id: The ID to validate
-        
-    Returns:
-        bool: True if valid, False otherwise
+    Validate an incident ID.
+
+    Legacy four-character identifiers remain supported, while newly generated
+    IDs can be project-prefixed and contain up to eight uppercase alphanumeric
+    characters.
     """
-    if not incident_id or not isinstance(incident_id, str):
+    if not isinstance(incident_id, str) or not incident_id:
         return False
-    
-    # Must be exactly 4 characters
-    if len(incident_id) != 4:
-        return False
-    
-    # Must be all uppercase alphanumeric
-    return incident_id.isalnum() and incident_id.isupper()
+
+    return (
+        len(incident_id) <= MAX_INCIDENT_ID_LENGTH
+        and incident_id.isalnum()
+        and incident_id == incident_id.upper()
+    )

@@ -22,6 +22,7 @@ import asyncio
 import difflib
 import hashlib
 import html as html_module
+from functools import partial
 import json
 import logging
 import mimetypes
@@ -78,7 +79,10 @@ from storage.customer_store import (
 from storage.database import get_db, get_session as get_db_session, init_database
 from storage.incident_repository import IncidentRepository
 from storage.models import ApprovalRequest, IncidentResponse, IncidentStatus, Severity
+from storage.security_audit_repository import SecurityAuditRepository
 from storage.telemetry_repository import TelemetryLogRepository
+from storage.workflow_history_repository import WorkflowHistoryRepository
+from utils.artifact_paths import managed_artifact_path
 
 try:
     from storage.auth_store import (
@@ -105,6 +109,13 @@ try:
         remove_user_from_project,
         get_user_projects,
         get_project_users,
+        create_project_api_key,
+        list_project_api_keys,
+        revoke_project_api_key,
+        list_project_applications,
+        upsert_project_application,
+        delete_project_application,
+        record_security_audit_event,
     )
     _AUTH_AVAILABLE = True
 except Exception as _auth_err:
@@ -136,6 +147,13 @@ except Exception as _auth_err:
     remove_user_from_project = _auth_unavailable
     get_user_projects = lambda user_id="": []
     get_project_users = lambda project_id="": []
+    create_project_api_key = _auth_unavailable
+    list_project_api_keys = _auth_unavailable
+    revoke_project_api_key = _auth_unavailable
+    list_project_applications = lambda project_id="": []
+    upsert_project_application = _auth_unavailable
+    delete_project_application = _auth_unavailable
+    record_security_audit_event = lambda *args, **kwargs: None
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 
@@ -176,7 +194,8 @@ app.mount("/static", StaticFiles(directory=os.path.join(_HERE, "static")), name=
 templates = Jinja2Templates(directory=os.path.join(_HERE, "templates"))
 
 settings = get_settings()
-_COOKIE_SECURE = os.getenv("PRISM_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes"}
+_COOKIE_SECURE = settings.effective_ui_cookie_secure
+_CSRF_ENABLED = settings.effective_csrf_enabled
 _SESSION_COOKIE_MAX_AGE = int(os.getenv("PRISM_SESSION_TTL_SECONDS", str(60 * 60 * 8)))
 
 
@@ -188,6 +207,24 @@ def _session_cookie_options(max_age: int | None = None) -> dict[str, Any]:
         "samesite": "lax",
         "max_age": _SESSION_COOKIE_MAX_AGE if max_age is None else max_age,
     }
+
+
+def _csrf_cookie_options() -> dict[str, Any]:
+    """CSRF token cookie is readable by same-origin JavaScript, never cross-site."""
+    return {
+        "httponly": False,
+        "secure": _COOKIE_SECURE,
+        "samesite": "lax",
+        "max_age": _SESSION_COOKIE_MAX_AGE,
+    }
+
+
+def _csrf_request_is_valid(request: Request, user: Optional[dict]) -> bool:
+    if not _CSRF_ENABLED or not user:
+        return True
+    supplied = request.headers.get("X-CSRF-Token", "")
+    expected = str(user.get("csrf_token") or "")
+    return bool(supplied and expected and secrets.compare_digest(supplied, expected))
 
 # Initialize SQLite schema once for the UI process instead of on each request path.
 init_database()
@@ -221,6 +258,8 @@ async def require_authenticated_api_requests(request: Request, call_next):
             return JSONResponse({"error": "Not authenticated"}, status_code=401)
         if path.startswith(_ADMIN_ONLY_API_PREFIXES) and user.get("role") != "admin":
             return JSONResponse({"error": "Admin role required"}, status_code=403)
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not _csrf_request_is_valid(request, user):
+            return JSONResponse({"error": "CSRF validation failed"}, status_code=403)
     return await call_next(request)
 
 
@@ -295,26 +334,8 @@ def _build_diff_rows(proposed_fix: str) -> Optional[list]:
     return rows or None
 
 
-def _safe_generated_file(path_value: Optional[str], allowed_suffixes: tuple[str, ...]) -> Optional[Path]:
-    if not path_value:
-        return None
-    try:
-        candidate = Path(path_value).expanduser().resolve()
-    except Exception:
-        return None
-    if not candidate.exists() or not candidate.is_file():
-        return None
-    if candidate.suffix.lower() not in allowed_suffixes:
-        return None
-    return candidate
-
-
 def _build_artifact_info(path_value: Optional[str], kind: str, incident_id: str) -> Optional[dict]:
-    suffixes = {
-        "pdf": (".pdf",),
-        "patch": (".patch", ".diff", ".txt", ".md"),
-    }[kind]
-    artifact_path = _safe_generated_file(path_value, suffixes)
+    artifact_path = managed_artifact_path(path_value, kind)
     if not artifact_path:
         return None
 
@@ -577,6 +598,39 @@ def get_repository(db: Session = Depends(get_db)) -> IncidentRepository:
     return IncidentRepository(db)
 
 
+def _audit_actor(request: Request) -> dict[str, Optional[str]]:
+    """Build non-sensitive actor context for an audit record."""
+    user = _get_current_user(request) or {}
+    client = request.client
+    return {
+        "actor_type": str(user.get("role") or "anonymous"),
+        "actor_id": _get_user_id(user) or None,
+        "source_ip": client.host if client else None,
+    }
+
+
+def _record_request_audit(
+    request: Request,
+    action: str,
+    *,
+    project_id: Optional[str] = None,
+    target_type: Optional[str] = None,
+    target_id: Optional[str] = None,
+    outcome: str = "success",
+    details: Optional[dict] = None,
+) -> None:
+    """Persist safe request-level security evidence without failing the action."""
+    record_security_audit_event(
+        action,
+        project_id=project_id,
+        target_type=target_type,
+        target_id=target_id,
+        outcome=outcome,
+        details=details or {},
+        **_audit_actor(request),
+    )
+
+
 # ── Helper: serialize incident to dict ───────────────────────────────────────
 def _incident_to_dict(inc) -> dict:
     d = {}
@@ -711,24 +765,11 @@ def _normalize_project_token(value: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
 
 
-def _load_app_repo_mapping() -> dict:
-    try:
-        import yaml
-
-        with open("config/app_repo_mapping.yaml", "r", encoding="utf-8") as mapping_file:
-            mapping_config = yaml.safe_load(mapping_file) or {}
-        return mapping_config.get("app_mappings") or {}
-    except Exception as exc:
-        logger.debug("Could not load app repo mapping: %s", exc)
-        return {}
-
-
 def _project_candidate_tokens(project: Optional[dict], incident_app_name: Optional[str] = None) -> set[str]:
     if not project:
         return set()
 
     project_repo_url = (project.get("repo_url") or "").strip()
-    project_app_names = project.get("app_names") or []
     project_id = (project.get("id") or "").strip()
 
     candidate_tokens: set[str] = set()
@@ -741,40 +782,26 @@ def _project_candidate_tokens(project: Optional[dict], incident_app_name: Option
         if repo_leaf:
             candidate_tokens.add(repo_leaf)
 
-    for app_alias in project_app_names:
-        normalized_alias = _normalize_project_token(app_alias)
-        if normalized_alias:
-            candidate_tokens.add(normalized_alias)
-
     if project_id and _AUTH_AVAILABLE:
         try:
-            from storage.auth_store import get_app_repo_mapping as _get_db_mapping
-            db_mappings = _get_db_mapping(project_id) or {}
-            for mapped_app, mapping_val in db_mappings.items():
-                app_tok = _normalize_project_token(mapped_app)
-                if app_tok:
-                    candidate_tokens.add(app_tok)
-                mapped_repo = (mapping_val.get("repo") or "") if isinstance(mapping_val, dict) else ""
-                if mapped_repo:
-                    mapped_repo_token = _normalize_project_token(mapped_repo)
-                    if mapped_repo_token:
-                        candidate_tokens.add(mapped_repo_token)
-                    leaf = _normalize_project_token(mapped_repo.split("/")[-1])
-                    if leaf:
-                        candidate_tokens.add(leaf)
+            for application in list_project_applications(project_id):
+                for identifier in (
+                    application.get("id"),
+                    application.get("name"),
+                    application.get("service_name"),
+                    *(application.get("aliases") or []),
+                ):
+                    token = _normalize_project_token(identifier)
+                    if token:
+                        candidate_tokens.add(token)
+                repository = str(application.get("repository") or "")
+                if repository:
+                    candidate_tokens.add(_normalize_project_token(repository))
+                    candidate_tokens.add(
+                        _normalize_project_token(repository.rstrip("/").split("/")[-1])
+                    )
         except Exception:
             pass
-
-    if incident_app_name:
-        mapped_repo = (_load_app_repo_mapping().get(incident_app_name) or {}).get("repo") or ""
-        if mapped_repo:
-            mapped_repo_token = _normalize_project_token(mapped_repo)
-            if mapped_repo_token:
-                candidate_tokens.add(mapped_repo_token)
-            mapped_repo_leaf = _normalize_project_token(mapped_repo.split("/")[-1])
-            if mapped_repo_leaf:
-                candidate_tokens.add(mapped_repo_leaf)
-
     return {token for token in candidate_tokens if token}
 
 
@@ -1551,23 +1578,43 @@ async def login_post(
         )
     user = authenticate_user(username, password)
     if not user:
+        record_security_audit_event(
+            "auth.login_failed",
+            actor_type="anonymous",
+            actor_id=username[:255] or None,
+            outcome="failure",
+            source_ip=request.client.host if request.client else None,
+        )
         return templates.TemplateResponse(
             request, "login.html", {"error": "Invalid username or password"}
         )
+    record_security_audit_event(
+        "auth.login_succeeded",
+        actor_type=str(user.get("role") or "user"),
+        actor_id=str(user.get("id") or ""),
+        source_ip=request.client.host if request.client else None,
+    )
     token = create_session(user)
     home = _role_home(user.get("role", "user"))
     resp = RedirectResponse(url=home, status_code=302)
     resp.set_cookie("session", token, **_session_cookie_options())
+    csrf_token = str((get_session(token) or {}).get("csrf_token") or "")
+    if csrf_token:
+        resp.set_cookie("csrf_token", csrf_token, **_csrf_cookie_options())
     return resp
 
 
 @app.get("/logout")
 async def logout(request: Request):
+    user = _get_current_user(request)
     token = request.cookies.get("session")
+    if user:
+        _record_request_audit(request, "auth.logout")
     if token and _AUTH_AVAILABLE:
         delete_session(token)
     resp = RedirectResponse(url="/login", status_code=302)
     resp.delete_cookie("session", httponly=True, secure=_COOKIE_SECURE, samesite="lax")
+    resp.delete_cookie("csrf_token", httponly=False, secure=_COOKIE_SECURE, samesite="lax")
     return resp
 
 
@@ -1992,10 +2039,81 @@ async def api_team_admin_add_member(request: Request):
         for pid in project_ids:
             if pid:
                 assign_user_to_project(new_user["id"], pid)
+                _record_request_audit(
+                    request,
+                    "project.member_assigned",
+                    project_id=str(pid),
+                    target_type="user",
+                    target_id=str(new_user["id"]),
+                )
         return JSONResponse({"success": True, "user": new_user}, status_code=201)
     except Exception as exc:
         logger.error("add-member error: %s", exc, exc_info=True)
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/team-admin/api-keys")
+async def api_team_admin_list_api_keys(request: Request, project_id: str = Query(default="")):
+    """List redacted ingestion API-key lifecycle metadata for an accessible project."""
+    redir = _require_role(request, "team_admin", "admin")
+    if redir:
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+
+    user = _get_current_user(request)
+    project_id = project_id.strip() or _get_active_project_id(request, user)
+    if not project_id:
+        return JSONResponse({"error": "No project found for this user"}, status_code=400)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
+
+    return JSONResponse({"project_id": project_id, "api_keys": list_project_api_keys(project_id)})
+
+
+@app.post("/api/team-admin/api-keys", status_code=201)
+async def api_team_admin_create_api_key(request: Request):
+    """Issue a project ingestion key; its plaintext value is returned only once."""
+    redir = _require_role(request, "team_admin", "admin")
+    if redir:
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    user = _get_current_user(request)
+    project_id = str(body.get("project_id") or "").strip() or _get_active_project_id(request, user)
+    if not project_id:
+        return JSONResponse({"error": "No project found for this user"}, status_code=400)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
+
+    label = str(body.get("label") or "Ingestion key").strip()
+    if not label:
+        return JSONResponse({"error": "A key label is required"}, status_code=400)
+    expires_at = body.get("expires_at")
+    if expires_at is not None and not isinstance(expires_at, str):
+        return JSONResponse({"error": "expires_at must be an ISO-8601 string"}, status_code=400)
+
+    issued = create_project_api_key(project_id, label, expires_at=expires_at)
+    return JSONResponse({"project_id": project_id, "api_key": issued}, status_code=201)
+
+
+@app.delete("/api/team-admin/api-keys/{key_id}")
+async def api_team_admin_revoke_api_key(key_id: str, request: Request, project_id: str = Query(default="")):
+    """Revoke a project ingestion key while retaining its lifecycle record."""
+    redir = _require_role(request, "team_admin", "admin")
+    if redir:
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+
+    user = _get_current_user(request)
+    project_id = project_id.strip() or _get_active_project_id(request, user)
+    if not project_id:
+        return JSONResponse({"error": "No project found for this user"}, status_code=400)
+    if not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
+    if not revoke_project_api_key(project_id, key_id):
+        return JSONResponse({"error": "Active API key not found"}, status_code=404)
+    return JSONResponse({"success": True, "project_id": project_id, "key_id": key_id})
 
 
 @app.post("/api/team-admin/integration/{int_type}")
@@ -2055,6 +2173,14 @@ async def api_team_admin_save_integration(int_type: str, request: Request):
             if k not in {"project_id", "verification_token"}
         }
         update_project_config(project_id, int_type, config_data)
+        _record_request_audit(
+            request,
+            "integration.saved",
+            project_id=project_id,
+            target_type="integration",
+            target_id=int_type,
+            details={"configured_fields": sorted(config_data.keys())},
+        )
         return JSONResponse({"success": True, "type": int_type, "project_id": project_id})
     except Exception as exc:
         logger.error("save-integration error: %s", exc, exc_info=True)
@@ -2087,90 +2213,116 @@ async def api_team_admin_delete_integration(int_type: str, request: Request):
 
     try:
         clear_project_config(project_id, int_type)
+        _record_request_audit(
+            request,
+            "integration.deleted",
+            project_id=project_id,
+            target_type="integration",
+            target_id=int_type,
+        )
         return JSONResponse({"success": True, "type": int_type, "project_id": project_id})
     except Exception as exc:
         logger.error("delete-integration error: %s", exc, exc_info=True)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
-@app.get("/api/team-admin/repo-mappings")
-async def api_get_repo_mappings(request: Request, project_id: str = Query(default="")):
-    """Return the app→repo mappings for a project."""
+@app.get("/api/team-admin/applications")
+async def api_team_admin_list_applications(
+    request: Request,
+    project_id: str = Query(default=""),
+):
+    """Return registered applications and legacy aliases for an accessible project."""
     redir = _require_role(request, "team_admin", "admin")
     if redir:
         return JSONResponse({"error": "Unauthorized"}, status_code=403)
-    if not _AUTH_AVAILABLE or not project_id:
-        return JSONResponse({})
+
+    user = _get_current_user(request)
+    project_id = project_id.strip() or _get_active_project_id(request, user)
+    if not project_id:
+        return JSONResponse({"error": "No project found for this user"}, status_code=400)
     if not _can_manage_project(request, project_id):
         return JSONResponse({"error": "Project access denied"}, status_code=403)
-    try:
-        from storage.auth_store import get_app_repo_mapping
-        return JSONResponse(get_app_repo_mapping(project_id))
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"project_id": project_id, "applications": list_project_applications(project_id)})
 
 
-@app.post("/api/team-admin/repo-mappings")
-async def api_save_repo_mappings(request: Request):
-    """Save (overwrite) the app→repo mappings for a project."""
+@app.post("/api/team-admin/applications", status_code=201)
+async def api_team_admin_upsert_application(request: Request):
+    """Register an application, its OTLP aliases, and optional repository override."""
     redir = _require_role(request, "team_admin", "admin")
     if redir:
         return JSONResponse({"error": "Unauthorized"}, status_code=403)
-    if not _AUTH_AVAILABLE:
-        return JSONResponse({"error": "Auth not available"}, status_code=503)
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-    project_id = (body.get("project_id") or "").strip()
-    if not project_id:
-        user = _get_current_user(request)
-        project_id = _get_active_project_id(request, user)
+    user = _get_current_user(request)
+    project_id = str(body.get("project_id") or "").strip() or _get_active_project_id(request, user)
     if not project_id:
         return JSONResponse({"error": "No project found for this user"}, status_code=400)
     if not _can_manage_project(request, project_id):
         return JSONResponse({"error": "Project access denied"}, status_code=403)
 
-    mappings = body.get("mappings") or {}
-    if not isinstance(mappings, dict):
-        return JSONResponse({"error": "mappings must be a JSON object"}, status_code=400)
+    name = str(body.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "Application name is required"}, status_code=400)
 
-    # Normalize: ensure every repo value is in "org/repo" format.
-    # If a bare repo name is provided (no slash), auto-prepend the project's configured GitHub org.
-    try:
-        from storage.auth_store import get_project_config as _get_proj_cfg
-        _proj_cfg = _get_proj_cfg(project_id) or {}
-        _github_org = (_proj_cfg.get("github") or {}).get("org", "").strip()
-    except Exception:
-        _github_org = ""
+    aliases = body.get("aliases") or []
+    if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
+        return JSONResponse({"error": "aliases must be an array of strings"}, status_code=400)
 
-    normalized_mappings: dict = {}
-    for app_name, mapping_val in mappings.items():
-        if not isinstance(mapping_val, dict):
-            continue
-        repo_val = (mapping_val.get("repo") or "").strip()
-        if repo_val and "/" not in repo_val:
-            if _github_org:
-                repo_val = f"{_github_org}/{repo_val}"
-                logger.info(
-                    "Repo mapping normalized: '%s' → '%s' for app '%s'",
-                    mapping_val.get("repo"), repo_val, app_name,
-                )
-            else:
-                logger.warning(
-                    "Repo mapping for app '%s' has no org prefix and no GitHub org configured: '%s'",
-                    app_name, repo_val,
-                )
-        normalized_mappings[app_name] = {**mapping_val, "repo": repo_val}
+    repository = str(body.get("repository") or "").strip()
+    if repository and "/" not in repository:
+        github = get_project_config(project_id).get("github") or {}
+        organization = str(github.get("org") or "").strip()
+        if organization:
+            repository = f"{organization}/{repository}"
 
     try:
-        from storage.auth_store import set_app_repo_mapping
-        set_app_repo_mapping(project_id, normalized_mappings)
-        return JSONResponse({"success": True, "project_id": project_id, "count": len(normalized_mappings)})
+        application = upsert_project_application(
+            project_id,
+            {
+                **body,
+                "repository": repository,
+                "aliases": aliases,
+            },
+        )
+        _record_request_audit(
+            request,
+            "application.saved",
+            project_id=project_id,
+            target_type="application",
+            target_id=str((application or {}).get("id") or name),
+            details={"name": name, "has_repository": bool(repository), "alias_count": len(aliases)},
+        )
+        return JSONResponse({"success": True, "project_id": project_id, "application": application}, status_code=201)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as exc:
-        logger.error("save-repo-mappings error: %s", exc, exc_info=True)
+        logger.error("save-application error: %s", exc, exc_info=True)
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.delete("/api/team-admin/applications/{application_id}")
+async def api_team_admin_delete_application(application_id: str, request: Request, project_id: str = Query(default="")):
+    """Delete a registered application; incident history and legacy aliases are retained."""
+    redir = _require_role(request, "team_admin", "admin")
+    if redir:
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+    user = _get_current_user(request)
+    project_id = project_id.strip() or _get_active_project_id(request, user)
+    if not project_id or not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
+    if not delete_project_application(project_id, application_id):
+        return JSONResponse({"error": "Application not found"}, status_code=404)
+    _record_request_audit(
+        request,
+        "application.deleted",
+        project_id=project_id,
+        target_type="application",
+        target_id=application_id,
+    )
+    return JSONResponse({"success": True, "project_id": project_id, "deleted": application_id})
 
 
 @app.post("/api/team-admin/runtime-config")
@@ -3626,6 +3778,15 @@ async def api_approve(
             pass
 
     repo.update(incident_id, **updates)
+    selected_project = _get_selected_project(request, _get_current_user(request))
+    _record_request_audit(
+        request,
+        "incident.approved" if action == "approve" else "incident.rejected",
+        project_id=str((selected_project or {}).get("id") or "") or None,
+        target_type="incident",
+        target_id=incident_id,
+        details={"has_notes": bool(notes), "rejection_reason_code": rejection_reason_code or None},
+    )
 
     # Notify SSE subscribers
     await _broadcast(
@@ -3746,6 +3907,289 @@ async def api_continue_post_approval(
     except Exception as exc:
         logger.error("Post-approval workflow error for %s: %s", incident_id, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/incidents/{incident_id}/recover-post-approval")
+async def api_recover_post_approval(
+    request: Request,
+    incident_id: str,
+    repo: IncidentRepository = Depends(get_repository),
+):
+    """Queue a privileged, auditable retry of a failed post-approval workflow."""
+    redir = _require_role(request, "admin", "team_admin")
+    if redir:
+        return JSONResponse({"error": "Operator role required"}, status_code=403)
+
+    incident = repo.get_by_id(incident_id)
+    if not incident or not _can_access_incident(request, incident):
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    if str(getattr(incident, "approval_status", "") or "").lower() != "approved":
+        raise HTTPException(
+            status_code=400,
+            detail="Only approved incidents can resume post-approval processing.",
+        )
+
+    status = str(getattr(incident, "status", "") or "").upper()
+    if status in {"COMPLETED", "PR_CREATED"} or getattr(incident, "pr_url", None):
+        raise HTTPException(
+            status_code=409,
+            detail="This incident already has completed pull-request processing.",
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    recovery_reason = str(body.get("reason") or "").strip()
+    if len(recovery_reason) < 3 or len(recovery_reason) > 500:
+        return JSONResponse(
+            {"error": "reason must contain between 3 and 500 characters"},
+            status_code=400,
+        )
+
+    active_token = getattr(incident, "workflow_run_token", None)
+    started_at = getattr(incident, "workflow_started_at", None)
+    if active_token and started_at:
+        age_seconds = (datetime.utcnow() - started_at).total_seconds()
+        if age_seconds < 30 * 60:
+            raise HTTPException(
+                status_code=409,
+                detail="A workflow execution is already active for this incident.",
+            )
+
+    selected_project = _get_selected_project(request, _get_current_user(request))
+    project_id = str((selected_project or {}).get("id") or "") or None
+    actor_id = _get_user_id(_get_current_user(request)) or None
+    _record_request_audit(
+        request,
+        "workflow.recovery_requested",
+        project_id=project_id,
+        target_type="incident",
+        target_id=incident_id,
+        details={"reason": recovery_reason},
+    )
+
+    try:
+        from agents.workflow import run_post_approval_workflow
+
+        job = partial(
+            run_post_approval_workflow,
+            incident_id,
+            project_id,
+            trigger_source="operator_recovery",
+            triggered_by=actor_id,
+            recovery_reason=recovery_reason,
+        )
+        asyncio.get_running_loop().run_in_executor(None, job)
+        await _broadcast(
+            "workflow_recovery",
+            {
+                "incident_id": incident_id,
+                "status": "queued",
+                "requested_by": actor_id,
+            },
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "incident_id": incident_id,
+                "message": "Post-approval workflow recovery has been queued.",
+            },
+            status_code=202,
+        )
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Workflow module not available")
+    except Exception as exc:
+        logger.error(
+            "Workflow recovery queueing failed for %s: %s",
+            incident_id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Unable to queue workflow recovery")
+
+
+@app.get("/api/workflow-health")
+async def api_workflow_health(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return tenant-scoped workflow reliability indicators for operators."""
+    redir = _require_role(request, "admin", "team_admin")
+    if redir:
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+
+    selected_project = _get_selected_project(request, _get_current_user(request))
+    if not selected_project:
+        return JSONResponse({"error": "No selected project"}, status_code=400)
+
+    project_id = str(selected_project["id"])
+    return JSONResponse(
+        {
+            "project_id": project_id,
+            "health": WorkflowHistoryRepository(db).get_health_summary(
+                project_id=project_id
+            ),
+        }
+    )
+
+
+@app.get("/api/incidents/{incident_id}/workflow-runs")
+async def api_incident_workflow_runs(
+    request: Request,
+    incident_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    repo: IncidentRepository = Depends(get_repository),
+):
+    """Return execution history for an incident in the caller's project."""
+    incident = repo.get_by_id(incident_id)
+    if not incident or not _can_access_incident(request, incident):
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    history = WorkflowHistoryRepository(repo.db)
+    project_id = getattr(incident, "project_id", None)
+    return JSONResponse(
+        {
+            "incident_id": incident_id,
+            "runs": [
+                history.serialize_run(run)
+                for run in history.get_runs(
+                    project_id=project_id,
+                    incident_id=incident_id,
+                    limit=limit,
+                    offset=offset,
+                )
+            ],
+            "limit": limit,
+            "offset": offset,
+        }
+    )
+
+
+@app.get("/api/workflow-runs/{run_id}/events")
+async def api_workflow_run_events(
+    request: Request,
+    run_id: str,
+    db: Session = Depends(get_db),
+):
+    """Return chronological operational events for an authorized workflow run."""
+    auth_redirect = _require_auth(request)
+    if auth_redirect:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    selected_project = _get_selected_project(request, _get_current_user(request))
+    if not selected_project:
+        return JSONResponse({"error": "No selected project"}, status_code=400)
+
+    history = WorkflowHistoryRepository(db)
+    project_id = str(selected_project["id"])
+    return JSONResponse(
+        {
+            "run_id": run_id,
+            "events": [
+                history.serialize_step_event(event)
+                for event in history.get_step_events(
+                    project_id=project_id, run_id=run_id
+                )
+            ],
+        }
+    )
+
+
+@app.get("/api/security-audit")
+async def api_security_audit(
+    request: Request,
+    action: Optional[str] = Query(default=None),
+    outcome: Optional[str] = Query(default=None),
+    actor_type: Optional[str] = Query(default=None),
+    target_type: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """Return persistent security events for the caller's selected project."""
+    redir = _require_role(request, "admin", "team_admin")
+    if redir:
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+
+    user = _get_current_user(request)
+    selected_project = _get_selected_project(request, user)
+    if not selected_project:
+        return JSONResponse({"events": [], "limit": limit, "offset": offset})
+
+    audit_repo = SecurityAuditRepository(db)
+    events = audit_repo.get_all(
+        project_id=str(selected_project["id"]),
+        action=action or None,
+        outcome=outcome or None,
+        actor_type=actor_type or None,
+        target_type=target_type or None,
+        limit=limit,
+        offset=offset,
+    )
+    return JSONResponse(
+        {
+            "project_id": selected_project["id"],
+            "events": [audit_repo.serialize(event) for event in events],
+            "limit": limit,
+            "offset": offset,
+        }
+    )
+
+
+@app.get("/api/security-audit/export.csv")
+async def api_export_security_audit_csv(
+    request: Request,
+    action: Optional[str] = Query(default=None),
+    outcome: Optional[str] = Query(default=None),
+    actor_type: Optional[str] = Query(default=None),
+    target_type: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Export safely serialized security events for the selected project."""
+    import csv
+    import io
+
+    redir = _require_role(request, "admin", "team_admin")
+    if redir:
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+
+    user = _get_current_user(request)
+    selected_project = _get_selected_project(request, user)
+    if not selected_project:
+        return JSONResponse({"error": "No selected project"}, status_code=400)
+
+    audit_repo = SecurityAuditRepository(db)
+    events = audit_repo.get_all(
+        project_id=str(selected_project["id"]),
+        action=action or None,
+        outcome=outcome or None,
+        actor_type=actor_type or None,
+        target_type=target_type or None,
+        limit=500,
+    )
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "event_id", "project_id", "created_at", "action", "outcome",
+        "actor_type", "actor_id", "target_type", "target_id", "source_ip", "details",
+    ])
+    for event in events:
+        item = audit_repo.serialize(event)
+        writer.writerow([
+            item["event_id"], item["project_id"], item["created_at"], item["action"],
+            item["outcome"], item["actor_type"], item["actor_id"], item["target_type"],
+            item["target_id"], item["source_ip"], json.dumps(item["details"], sort_keys=True),
+        ])
+    filename = f"prism_security_audit_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/audit/export.csv")
@@ -3872,7 +4316,19 @@ async def api_admin_apply_retention(request: Request):
 
     try:
         from scripts.apply_retention_policy import apply_retention
-        result = apply_retention(days=days, dry_run=dry_run)
+        user = _get_current_user(request)
+        selected_project = _get_selected_project(request, user)
+        project_id = str(body.get("project_id") or "").strip() or None
+        if project_id and not _can_manage_project(request, project_id):
+            return JSONResponse({"error": "Project access denied"}, status_code=403)
+        result = apply_retention(days=days, dry_run=dry_run, project_id=project_id)
+        _record_request_audit(
+            request,
+            "retention.requested",
+            project_id=project_id,
+            target_type="retention_policy",
+            details={"dry_run": dry_run, "days": days},
+        )
         return JSONResponse({"ok": True, **result})
     except Exception as exc:
         logger.error("apply-retention error: %s", exc, exc_info=True)
@@ -4459,7 +4915,6 @@ async def traces_page(request: Request):
     user = _get_current_user(request)
     selected_project = _get_selected_project(request, user)
     integration_status = _get_project_integration_status(selected_project)
-    observability_data = _load_live_observability_data(selected_project)
     return templates.TemplateResponse(
         request,
         "traces.html",
@@ -4467,9 +4922,6 @@ async def traces_page(request: Request):
             "current_user": user,
             "selected_project": selected_project,
             "integration_status": integration_status,
-            "trace_summary": observability_data["trace_summary"],
-            "traces": observability_data["traces"],
-            "failed_spans": observability_data["failed_spans"],
             "page": "traces",
         },
     )
@@ -4483,7 +4935,6 @@ async def metrics_page(request: Request):
     user = _get_current_user(request)
     selected_project = _get_selected_project(request, user)
     integration_status = _get_project_integration_status(selected_project)
-    observability_data = _load_live_observability_data(selected_project)
     return templates.TemplateResponse(
         request,
         "metrics.html",
@@ -4491,9 +4942,6 @@ async def metrics_page(request: Request):
             "current_user": user,
             "selected_project": selected_project,
             "integration_status": integration_status,
-            "metrics_summary": observability_data["metrics_summary"],
-            "metrics_rows": observability_data["metrics_rows"],
-            "top_error_apps": observability_data["top_error_apps"],
             "page": "metrics",
         },
     )
@@ -4746,12 +5194,21 @@ async def api_sidebar_apps(
     if not selected_project:
         return []
     try:
+        registered = {
+            str(application.get("name") or "").strip()
+            for application in list_project_applications(str(selected_project.get("id") or ""))
+            if application.get("enabled", True) and str(application.get("name") or "").strip()
+        }
         incidents = [
             incident for incident in repo.get_all(limit=1000)
             if _incident_matches_project(incident, selected_project)
         ]
-        apps = sorted({str(i.app_name) for i in incidents if getattr(i, "app_name", None) is not None and str(i.app_name).strip()})
-        return apps
+        observed = {
+            str(incident.app_name).strip()
+            for incident in incidents
+            if getattr(incident, "app_name", None) is not None and str(incident.app_name).strip()
+        }
+        return sorted(registered | observed, key=str.lower)
     except Exception:
         return []
 

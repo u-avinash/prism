@@ -28,6 +28,32 @@
   const prism = {};
   window.prism = prism;
 
+  function csrfToken() {
+    const prefix = 'csrf_token=';
+    return document.cookie.split('; ').reduce(function (value, item) {
+      return item.indexOf(prefix) === 0 ? decodeURIComponent(item.slice(prefix.length)) : value;
+    }, '');
+  }
+
+  // Apply CSRF protection at the browser boundary so all same-origin mutation
+  // calls—including page-specific scripts—carry the per-session token.
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    const options = init ? Object.assign({}, init) : {};
+    const method = String(options.method || (input && input.method) || 'GET').toUpperCase();
+    const target = new URL(typeof input === 'string' ? input : input.url, window.location.origin);
+    if (
+      ['POST', 'PUT', 'PATCH', 'DELETE'].indexOf(method) !== -1 &&
+      target.origin === window.location.origin
+    ) {
+      const headers = new Headers(options.headers || (input && input.headers) || {});
+      const token = csrfToken();
+      if (token) headers.set('X-CSRF-Token', token);
+      options.headers = headers;
+    }
+    return nativeFetch(input, options);
+  };
+
   /* ─────────────────────────────────────────────────────────────────────
    * 2. TOAST NOTIFICATIONS
    * ───────────────────────────────────────────────────────────────────── */

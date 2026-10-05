@@ -147,53 +147,6 @@ def check_incident_status(incident_id, api_url="http://localhost:8000"):
         return False
 
 
-def check_app_repo_mapping():
-    """Verify that order-processing-service is in the app repo mapping."""
-    print("\n" + "=" * 80)
-    print("Checking Application-to-Repository Mapping")
-    print("=" * 80)
-    
-    mapping_path = Path(__file__).parent.parent.parent / "config" / "app_repo_mapping.yaml"
-    
-    try:
-        with open(mapping_path, 'r') as f:
-            content = f.read()
-        
-        if 'order-processing-service:' in content:
-            print("\n✓ order-processing-service mapping found!")
-            
-            # Extract the mapping details
-            lines = content.split('\n')
-            in_order_section = False
-            for i, line in enumerate(lines):
-                if 'order-processing-service:' in line:
-                    in_order_section = True
-                    print(f"\n  Mapping configuration:")
-                    print(f"  {line}")
-                elif in_order_section:
-                    if line.strip() and not line.strip().startswith('#'):
-                        if line.startswith('  ') and not line.startswith('    '):
-                            # Next top-level entry, stop
-                            break
-                        print(f"  {line}")
-                    elif not line.strip():
-                        break
-            
-            return True
-        else:
-            print("\n✗ order-processing-service NOT FOUND in mapping!")
-            print("\n  To fix this, add the following to config/app_repo_mapping.yaml:")
-            print("\n  order-processing-service:")
-            print("    repo: avinash-ai-langchain/order-processing-service")
-            print("    branch: main")
-            print("    description: 'Order processing service'")
-            return False
-            
-    except Exception as e:
-        print(f"\n✗ Error reading mapping file: {str(e)}")
-        return False
-
-
 if __name__ == "__main__":
     import argparse
     
@@ -205,12 +158,6 @@ if __name__ == "__main__":
         default="http://localhost:8000",
         help="Base URL of the ingestion API (default: http://localhost:8000)"
     )
-    parser.add_argument(
-        "--check-mapping-only",
-        action="store_true",
-        help="Only check the app-to-repo mapping configuration"
-    )
-    
     args = parser.parse_args()
     
     print("\n" + "=" * 80)
@@ -218,17 +165,6 @@ if __name__ == "__main__":
     print("=" * 80)
     print(f"API URL: {args.api_url}")
     print("=" * 80)
-    
-    # Always check mapping first
-    mapping_ok = check_app_repo_mapping()
-    
-    if args.check_mapping_only:
-        exit(0 if mapping_ok else 1)
-    
-    if not mapping_ok:
-        print("\n⚠ Warning: Mapping not configured correctly!")
-        print("The incident may be created but workflow steps may fail.")
-        print("\nContinuing with test anyway...\n")
     
     # Send OTLP message
     success, incident_id = send_otlp_message(args.api_url)
@@ -248,18 +184,11 @@ if __name__ == "__main__":
         print("✓ Incident created in database")
         print(f"✓ Incident ID: {incident_id}")
         
-        if mapping_ok:
-            print("✓ Repository mapping configured")
-            print("\nNext steps:")
-            print(f"1. Check the UI at http://localhost:8501")
-            print(f"2. Verify the incident appears with ID: {incident_id}")
-            print(f"3. Check that workflow steps complete (RCA, fix generation, etc.)")
-        else:
-            print("⚠ Repository mapping NOT configured")
-            print("\nTo complete the fix:")
-            print("1. Add order-processing-service to config/app_repo_mapping.yaml")
-            print("2. Ensure the GitHub repository exists")
-            print("3. Re-run this test")
+        print("\nNext steps:")
+        print("1. Check the UI at http://localhost:8080")
+        print(f"2. Verify the incident appears with ID: {incident_id}")
+        print("3. Configure a GitHub organization or register an application alias if source-code retrieval is required")
+        print("4. Check that workflow steps complete (RCA, fix generation, etc.)")
         
         print("=" * 80 + "\n")
         exit(0)

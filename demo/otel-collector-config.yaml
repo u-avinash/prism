@@ -1,0 +1,67 @@
+# PRISM demonstration-suite collector.
+#
+# Demo applications export OTLP/HTTP to http://otel-collector:4318.
+# This collector forwards signals to the PRISM ingestion API and attaches the
+# per-project API key only on this outbound hop.
+#
+# For a PRISM process running on the host, use:
+#   PRISM_INGESTION_ENDPOINT=http://host.docker.internal:8000
+#
+# The resource attributes emitted by each demo service include:
+#   service.name, service.version, deployment.environment.name,
+#   service.namespace, prism.project.name, prism.repository.url,
+#   prism.repository.branch, and prism.demo.scenario.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 128
+  batch:
+    timeout: 1s
+    send_batch_size: 1
+
+exporters:
+  debug:
+    verbosity: basic
+  otlphttp/prism:
+    endpoint: ${env:PRISM_INGESTION_ENDPOINT}
+    logs_endpoint: ${env:PRISM_INGESTION_ENDPOINT}/v1/logs
+    traces_endpoint: ${env:PRISM_INGESTION_ENDPOINT}/v1/traces
+    metrics_endpoint: ${env:PRISM_INGESTION_ENDPOINT}/v1/metrics
+    compression: none
+    encoding: json
+    headers:
+      Authorization: "Bearer ${env:PRISM_OTLP_EXPORT_API_KEY}"
+    tls:
+      insecure: true
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  extensions: [health_check]
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlphttp/prism]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlphttp/prism]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlphttp/prism]

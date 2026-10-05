@@ -14,21 +14,21 @@
 
   Copyright (c) 2026-2035 Upadhyayula Avinash. All rights reserved.
 """
-"""Unit tests for GitHub repository resolution hardening."""
+"""Unit tests for GitHub repository resolution."""
+
+from github import GithubException
 
 from integrations.github_client import GitHubClient
 
 
-def _make_client(org: str = "avinash-ai-langchain", mappings: dict | None = None) -> GitHubClient:
+def _make_client(org: str = "avinash-ai-langchain") -> GitHubClient:
     client = GitHubClient.__new__(GitHubClient)
     client.project_id = "PRJ-TEST"
     client.org = org
     client.default_branch = "main"
     client.token = "test-token"
     client.client = None
-
-    mapping_data = mappings or {}
-    client._get_repo_mappings = lambda: mapping_data  # type: ignore[method-assign]
+    client._get_registered_application = lambda identifier: None  # type: ignore[method-assign]
     return client
 
 
@@ -49,59 +49,35 @@ def test_is_full_repo_name_rejects_org_only_values() -> None:
     assert client._is_full_repo_name(None) is False
 
 
-def test_extract_repo_from_log_ignores_org_only_mapping_and_uses_log_url() -> None:
-    client = _make_client(
-        mappings={
-            "order-processing-service": {
-                "repo": "avinash-ai-langchain",
-                "branch": "main",
-            }
-        }
-    )
+def test_extract_repo_from_log_prefers_explicit_repository_identifier() -> None:
+    client = _make_client()
 
     repo = client.extract_repo_from_log(
-        "Build failed in https://github.com/avinash-ai-langchain/order-processing-service/actions/runs/123",
-        "order-processing-service",
+        "Build failed; github.repository=avinash-ai-langchain/order-processing-service",
+        "orders-worker",
     )
 
     assert repo == "avinash-ai-langchain/order-processing-service"
 
 
-def test_extract_repo_from_log_uses_case_insensitive_valid_mapping() -> None:
-    client = _make_client(
-        mappings={
-            "Order-Processing-Service": {
-                "repo": "https://github.com/avinash-ai-langchain/order-processing-service.git",
-                "branch": "main",
-            }
-        }
-    )
+def test_extract_repo_from_log_uses_registered_application_repository() -> None:
+    client = _make_client()
+    client._get_registered_application = lambda identifier: {  # type: ignore[method-assign]
+        "name": "Order Processing",
+        "repository": "https://github.com/avinash-ai-langchain/order-processing-service.git",
+    }
 
-    repo = client.extract_repo_from_log("Error in order-processing-service", "order-processing-service")
-
-    assert repo == "avinash-ai-langchain/order-processing-service"
-
-
-def test_extract_repo_from_log_derives_repo_from_org_only_mapping() -> None:
-    client = _make_client(
-        mappings={
-            "order-processing-service": {
-                "repo": "avinash-ai-langchain",
-                "branch": "main",
-            }
-        }
-    )
-
-    repo = client.extract_repo_from_log("Error in order-processing-service", "order-processing-service")
+    repo = client.extract_repo_from_log("Error in orders-worker", "orders-worker")
 
     assert repo == "avinash-ai-langchain/order-processing-service"
 
 
 def test_extract_repo_from_log_resolves_matching_repo_from_configured_org() -> None:
-    """Organization-wide access must work without a legacy app-to-repo mapping."""
+    """Organization-wide access works without a per-repository configuration."""
 
     class FakeRepo:
         full_name = "avinash-ai-langchain/order-processing-service"
+        name = "order-processing-service"
 
     class FakeOrganization:
         def get_repo(self, name: str):
@@ -115,8 +91,31 @@ def test_extract_repo_from_log_resolves_matching_repo_from_configured_org() -> N
 
     client = _make_client()
     client.client = FakeGithub()
-    client._get_repo_mappings = lambda: {}  # type: ignore[method-assign]
 
     repo = client.extract_repo_from_log("Order processing failure", "order-processing-service")
+
+    assert repo == "avinash-ai-langchain/order-processing-service"
+
+
+def test_extract_repo_from_log_uses_fuzzy_organization_match() -> None:
+    class FakeRepo:
+        full_name = "avinash-ai-langchain/order-processing-service"
+        name = "order-processing-service"
+
+    class FakeOrganization:
+        def get_repo(self, name: str):
+            raise GithubException(404, {"message": "Not Found"})
+
+        def get_repos(self):
+            return [FakeRepo()]
+
+    class FakeGithub:
+        def get_organization(self, name: str):
+            return FakeOrganization()
+
+    client = _make_client()
+    client.client = FakeGithub()
+
+    repo = client.extract_repo_from_log("Order processing failure", "order-processing")
 
     assert repo == "avinash-ai-langchain/order-processing-service"

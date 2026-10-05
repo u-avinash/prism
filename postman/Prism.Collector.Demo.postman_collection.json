@@ -1,0 +1,288 @@
+{
+  "info": {
+    "_postman_id": "2c52d3a1-73c7-443d-9f6e-e9bf50cc5a1c",
+    "name": "Prism Collector-Mediated Production Flow Demo",
+    "description": "Guided live demo for the intended production telemetry path: Postman → OpenTelemetry Collector (:4318) → Prism Ingestion API (:8000) → Prism Dashboard (:8080). Before running: start Prism UI and ingestion services, seed local data with `py -3.14 scripts\\\\seed_postman_data.py --reset`, set PRISM_OTLP_EXPORT_API_KEY to the seeded project key, then start otelcol-contrib with config/otel-collector-config.yaml. This collection never sends the Prism project key from Postman; the Collector adds it on the Collector-to-Prism hop.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if (!pm.environment.get('demo_run_id')) {",
+          "  pm.environment.set('demo_run_id', `demo-${Date.now()}`);",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "01 - Verify production-style path",
+      "item": [
+        {
+          "name": "Prism dashboard health",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Prism dashboard is available', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "OpenTelemetry Collector health",
+          "request": {
+            "method": "GET",
+            "url": "{{collector_health_url}}/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Collector health extension is available', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login as demo team admin",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded"
+              }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "username",
+                  "value": "{{demo_team_admin_username}}"
+                },
+                {
+                  "key": "password",
+                  "value": "{{demo_team_admin_password}}"
+                }
+              ]
+            },
+            "url": "{{ui_base_url}}/login"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('demo operator login succeeds', () => pm.expect(pm.response.code).to.eql(302));",
+                  "const token = pm.cookies.get('csrf_token');",
+                  "pm.test('CSRF cookie is supplied', () => pm.expect(token).to.be.a('string').and.not.empty);",
+                  "pm.environment.set('csrf_token', token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Select demo project",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrf_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"project_id\":\"{{demo_project_id}}\"}"
+            },
+            "url": "{{ui_base_url}}/api/switch-project"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('demo project is selected', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 - Send language-agnostic OTLP log batch through Collector",
+      "item": [
+        {
+          "name": "12 OTLP logs: 10 incidents + 2 telemetry-only records",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"resourceLogs\": [\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-mule-order-api\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"java\"}},{\"key\":\"cloudhub.application.name\",\"value\":{\"stringValue\":\"demo-mule-order-api\"}},{\"key\":\"mule.environment\",\"value\":{\"stringValue\":\"production\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"io.opentelemetry.mule\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000001\",\"severityNumber\":21,\"severityText\":\"FATAL\",\"traceId\":\"00000000000000000000000000000001\",\"spanId\":\"0000000000000001\",\"body\":{\"stringValue\":\"MuleSoft order flow failed: connector cannot reach payment gateway\"},\"attributes\":[{\"key\":\"exception.type\",\"value\":{\"stringValue\":\"org.mule.runtime.core.api.exception.MuleRuntimeException\"}},{\"key\":\"exception.message\",\"value\":{\"stringValue\":\"Payment gateway connection refused\"}},{\"key\":\"exception.stacktrace\",\"value\":{\"stringValue\":\"org.mule.runtime.core.api.exception.MuleRuntimeException: Payment gateway connection refused\\n at org.mule.runtime.core.internal.processor.LoggerMessageProcessor.process(LoggerMessageProcessor.java:88)\\n at com.mulesoft.order.PaymentFlow.execute(PaymentFlow.xml:42)\"}},{\"key\":\"mule.flow.name\",\"value\":{\"stringValue\":\"process-order-flow\"}},{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-java-catalog\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"java\"}},{\"key\":\"service.framework.name\",\"value\":{\"stringValue\":\"spring\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"io.opentelemetry.spring\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000002\",\"severityNumber\":17,\"severityText\":\"ERROR\",\"traceId\":\"00000000000000000000000000000002\",\"spanId\":\"0000000000000002\",\"body\":{\"stringValue\":\"Catalog query timed out while loading inventory\"},\"attributes\":[{\"key\":\"exception.type\",\"value\":{\"stringValue\":\"java.sql.SQLTimeoutException\"}},{\"key\":\"exception.message\",\"value\":{\"stringValue\":\"Read timed out after 3000 ms\"}},{\"key\":\"exception.stacktrace\",\"value\":{\"stringValue\":\"java.sql.SQLTimeoutException: Read timed out after 3000 ms\\n at org.springframework.jdbc.core.JdbcTemplate.query(JdbcTemplate.java:722)\\n at com.demo.catalog.InventoryRepository.findAvailable(InventoryRepository.java:71)\"}},{\"key\":\"http.status_code\",\"value\":{\"intValue\":\"504\"}},{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-python-fulfillment\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"python\"}},{\"key\":\"service.framework.name\",\"value\":{\"stringValue\":\"fastapi\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"opentelemetry.instrumentation.fastapi\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000003\",\"severityNumber\":17,\"severityText\":\"ERROR\",\"traceId\":\"00000000000000000000000000000003\",\"spanId\":\"0000000000000003\",\"body\":{\"stringValue\":\"Fulfillment request validation failed\"},\"attributes\":[{\"key\":\"exception.type\",\"value\":{\"stringValue\":\"pydantic.ValidationError\"}},{\"key\":\"exception.message\",\"value\":{\"stringValue\":\"warehouse_id field required\"}},{\"key\":\"exception.stacktrace\",\"value\":{\"stringValue\":\"Traceback (most recent call last):\\n  File \\\"app/api/fulfillment.py\\\", line 54, in create_shipment\\n    shipment = ShipmentRequest.model_validate(payload)\\npydantic.ValidationError: warehouse_id field required\"}},{\"key\":\"http.status_code\",\"value\":{\"intValue\":\"422\"}},{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-node-notification\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"nodejs\"}},{\"key\":\"service.framework.name\",\"value\":{\"stringValue\":\"express\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"@opentelemetry/instrumentation-express\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000004\",\"severityNumber\":17,\"severityText\":\"ERROR\",\"traceId\":\"00000000000000000000000000000004\",\"spanId\":\"0000000000000004\",\"body\":{\"stringValue\":\"Notification webhook delivery promise rejected\"},\"attributes\":[{\"key\":\"exception.type\",\"value\":{\"stringValue\":\"TypeError\"}},{\"key\":\"exception.message\",\"value\":{\"stringValue\":\"Cannot read properties of undefined (reading 'send')\"}},{\"key\":\"exception.stacktrace\",\"value\":{\"stringValue\":\"TypeError: Cannot read properties of undefined (reading 'send')\\n    at deliverWebhook (src/services/webhook.js:48:19)\\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)\"}},{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-dotnet-billing\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"dotnet\"}},{\"key\":\"service.framework.name\",\"value\":{\"stringValue\":\"aspnetcore\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"OpenTelemetry.Instrumentation.AspNetCore\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000005\",\"severityNumber\":21,\"severityText\":\"FATAL\",\"traceId\":\"00000000000000000000000000000005\",\"spanId\":\"0000000000000005\",\"body\":{\"stringValue\":\"Billing invoice calculation terminated unexpectedly\"},\"attributes\":[{\"key\":\"exception.type\",\"value\":{\"stringValue\":\"System.NullReferenceException\"}},{\"key\":\"exception.message\",\"value\":{\"stringValue\":\"Object reference not set to an instance of an object\"}},{\"key\":\"exception.stacktrace\",\"value\":{\"stringValue\":\"System.NullReferenceException: Object reference not set to an instance of an object\\n   at Demo.Billing.InvoiceService.Calculate(Invoice invoice) in C:\\\\src\\\\Billing\\\\InvoiceService.cs:line 118\\n   at Microsoft.AspNetCore.Mvc.Infrastructure.ActionMethodExecutor.Execute()\"}},{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-go-checkout\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"go\"}},{\"key\":\"service.framework.name\",\"value\":{\"stringValue\":\"gin\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"go.opentelemetry.io/contrib/instrumentation/gin\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000006\",\"severityNumber\":17,\"severityText\":\"ERROR\",\"traceId\":\"00000000000000000000000000000006\",\"spanId\":\"0000000000000006\",\"body\":{\"stringValue\":\"Checkout service panic recovered by middleware\"},\"attributes\":[{\"key\":\"exception.type\",\"value\":{\"stringValue\":\"runtime.errorString\"}},{\"key\":\"exception.message\",\"value\":{\"stringValue\":\"invalid memory address or nil pointer dereference\"}},{\"key\":\"exception.stacktrace\",\"value\":{\"stringValue\":\"panic: runtime error: invalid memory address or nil pointer dereference\\ngoroutine 301 [running]:\\ngithub.com/gin-gonic/gin.(*Context).MustGet(0xc00013a000, {0x1010})\\n/internal/checkout/handler.go:88 +0x42\"}},{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-ruby-customer\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"ruby\"}},{\"key\":\"service.framework.name\",\"value\":{\"stringValue\":\"rails\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"opentelemetry-instrumentation-rails\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000007\",\"severityNumber\":17,\"severityText\":\"ERROR\",\"traceId\":\"00000000000000000000000000000007\",\"spanId\":\"0000000000000007\",\"body\":{\"stringValue\":\"Customer profile update failed due to stale lock\"},\"attributes\":[{\"key\":\"exception.type\",\"value\":{\"stringValue\":\"ActiveRecord::StaleObjectError\"}},{\"key\":\"exception.message\",\"value\":{\"stringValue\":\"Attempted to update a stale object\"}},{\"key\":\"exception.stacktrace\",\"value\":{\"stringValue\":\"ActiveRecord::StaleObjectError: Attempted to update a stale object\\nfrom /app/app/models/customer.rb:91:in `save!'\\nfrom /app/app/controllers/customers_controller.rb:43:in `update'\"}},{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-php-payment\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"php\"}},{\"key\":\"service.framework.name\",\"value\":{\"stringValue\":\"laravel\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"open-telemetry/opentelemetry-laravel\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000008\",\"severityNumber\":17,\"severityText\":\"ERROR\",\"traceId\":\"00000000000000000000000000000008\",\"spanId\":\"0000000000000008\",\"body\":{\"stringValue\":\"Payment capture database transaction failed\"},\"attributes\":[{\"key\":\"exception.type\",\"value\":{\"stringValue\":\"Illuminate\\\\Database\\\\QueryException\"}},{\"key\":\"exception.message\",\"value\":{\"stringValue\":\"SQLSTATE[40001]: Serialization failure\"}},{\"key\":\"exception.stacktrace\",\"value\":{\"stringValue\":\"Illuminate\\\\Database\\\\QueryException: SQLSTATE[40001]: Serialization failure\\n#0 /var/www/app/vendor/laravel/framework/src/Illuminate/Database/Connection.php(760)\\n#1 /var/www/app/app/Services/PaymentCapture.php(67)\"}},{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-rust-shipping\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"rust\"}},{\"key\":\"service.framework.name\",\"value\":{\"stringValue\":\"axum\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"opentelemetry-rust\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000009\",\"severityNumber\":21,\"severityText\":\"FATAL\",\"traceId\":\"00000000000000000000000000000009\",\"spanId\":\"0000000000000009\",\"body\":{\"stringValue\":\"Shipping label renderer panicked\"},\"attributes\":[{\"key\":\"exception.type\",\"value\":{\"stringValue\":\"panic\"}},{\"key\":\"exception.message\",\"value\":{\"stringValue\":\"called Option::unwrap() on a None value\"}},{\"key\":\"exception.stacktrace\",\"value\":{\"stringValue\":\"thread 'tokio-runtime-worker' panicked at 'called Option::unwrap() on a None value', src/label.rs:73:18\\nstack backtrace:\\n   0: core::panicking::panic_fmt\\n   1: axum::routing::method_routing\"}},{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-kotlin-pricing\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"kotlin\"}},{\"key\":\"service.framework.name\",\"value\":{\"stringValue\":\"spring\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"io.opentelemetry.kotlin\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000010\",\"severityNumber\":17,\"severityText\":\"ERROR\",\"traceId\":\"00000000000000000000000000000010\",\"spanId\":\"0000000000000010\",\"body\":{\"stringValue\":\"Pricing rules service could not load active rule set\"},\"attributes\":[{\"key\":\"exception.type\",\"value\":{\"stringValue\":\"java.lang.IllegalStateException\"}},{\"key\":\"exception.message\",\"value\":{\"stringValue\":\"No active pricing rules for region APAC\"}},{\"key\":\"exception.stacktrace\",\"value\":{\"stringValue\":\"java.lang.IllegalStateException: No active pricing rules for region APAC\\n at com.demo.pricing.RuleService.activeRules(RuleService.kt:64)\\n at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)\"}},{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-node-notification\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"nodejs\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"@opentelemetry/instrumentation-express\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000011\",\"severityNumber\":13,\"severityText\":\"WARN\",\"traceId\":\"00000000000000000000000000000011\",\"spanId\":\"0000000000000011\",\"body\":{\"stringValue\":\"Notification provider response time approaching configured threshold\"},\"attributes\":[{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}},{\"key\":\"http.status_code\",\"value\":{\"intValue\":\"200\"}}]}]}]\n    },\n    {\n      \"resource\": {\"attributes\": [{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-python-fulfillment\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"python\"}}]},\n      \"scopeLogs\": [{\"scope\":{\"name\":\"opentelemetry.instrumentation.fastapi\"},\"logRecords\":[{\"timeUnixNano\":\"1760000000000000012\",\"severityNumber\":9,\"severityText\":\"INFO\",\"traceId\":\"00000000000000000000000000000012\",\"spanId\":\"0000000000000012\",\"body\":{\"stringValue\":\"Fulfillment worker recovered and resumed polling\"},\"attributes\":[{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]\n    }\n  ]\n}"
+            },
+            "url": "{{collector_base_url}}/v1/logs"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Collector accepts the OTLP log batch', () => pm.response.to.have.status(200));",
+                  "pm.test('Postman did not send a Prism authorization header', () => pm.expect(pm.request.headers.get('Authorization')).to.be.null);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 - Send traces and metrics through Collector",
+      "item": [
+        {
+          "name": "OTLP trace forwarded through Collector",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-java-catalog\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"io.opentelemetry.spring\"},\"spans\":[{\"traceId\":\"00000000000000000000000000000002\",\"spanId\":\"0000000000000002\",\"name\":\"GET /catalog/items\",\"kind\":2,\"startTimeUnixNano\":\"1760000000000000000\",\"endTimeUnixNano\":\"1760000001000000000\",\"status\":{\"code\":2,\"message\":\"catalog timeout\"},\"attributes\":[{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}]}]}"
+            },
+            "url": "{{collector_base_url}}/v1/traces"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Collector accepts OTLP trace input', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "OTLP metric forwarded through Collector",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"resourceMetrics\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"demo-go-checkout\"}},{\"key\":\"deployment.environment\",\"value\":{\"stringValue\":\"production\"}}]},\"scopeMetrics\":[{\"scope\":{\"name\":\"go.opentelemetry.io/otel\"},\"metrics\":[{\"name\":\"checkout.payment.latency\",\"description\":\"Demo checkout latency\",\"unit\":\"ms\",\"gauge\":{\"dataPoints\":[{\"asDouble\":2750,\"timeUnixNano\":\"1760000000000000000\",\"attributes\":[{\"key\":\"demo.run_id\",\"value\":{\"stringValue\":\"{{demo_run_id}}\"}}]}]}}]}]}]}"
+            },
+            "url": "{{collector_base_url}}/v1/metrics"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Collector accepts OTLP metric input', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 - Observe collector-forwarded Prism results",
+      "item": [
+        {
+          "name": "List incidents after collector batch",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/incidents"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Prism returns the selected project incidents', () => pm.response.to.have.status(200));",
+                  "const responseText = pm.response.text();",
+                  "pm.test('collector-forwarded MuleSoft incident is visible', () => pm.expect(responseText).to.include('Payment gateway connection refused'));",
+                  "pm.test('collector-forwarded Java incident is visible', () => pm.expect(responseText).to.include('Read timed out after 3000 ms'));",
+                  "pm.test('collector-forwarded Python incident is visible', () => pm.expect(responseText).to.include('warehouse_id field required'));",
+                  "pm.test('collector-forwarded Node.js incident is visible', () => pm.expect(responseText).to.include(\"Cannot read properties of undefined\"));",
+                  "pm.test('collector-forwarded .NET incident is visible', () => pm.expect(responseText).to.include('Object reference not set'));",
+                  "pm.test('collector-forwarded Go incident is visible', () => pm.expect(responseText).to.include('nil pointer dereference'));",
+                  "pm.test('collector-forwarded Ruby incident is visible', () => pm.expect(responseText).to.include('Attempted to update a stale object'));",
+                  "pm.test('collector-forwarded PHP incident is visible', () => pm.expect(responseText).to.include('Serialization failure'));",
+                  "pm.test('collector-forwarded Rust incident is visible', () => pm.expect(responseText).to.include('called Option::unwrap()'));",
+                  "pm.test('collector-forwarded Kotlin/JVM incident is visible', () => pm.expect(responseText).to.include('No active pricing rules'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Open Prism dashboard for visual demo",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/incidents"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('incident dashboard is available to the demo operator', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

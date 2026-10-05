@@ -83,7 +83,15 @@ db_path = s.database_path
 conn = sqlite3.connect(db_path, timeout=30, isolation_level="IMMEDIATE")
 cursor = conn.cursor()
 
-tables = ["incident_comments", "incidents", "telemetry_logs", "project_integration_configs"]
+tables = [
+    "workflow_step_events",
+    "workflow_runs",
+    "security_audit_events",
+    "incident_comments",
+    "telemetry_logs",
+    "incidents",
+    "project_integration_configs",
+]
 total = 0
 try:
     cursor.execute("PRAGMA journal_mode=WAL")

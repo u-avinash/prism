@@ -21,6 +21,7 @@ from typing import List, Optional, Dict
 from datetime import datetime, timedelta
 from storage.database import Incident, IncidentComment
 from storage.models import IncidentCreate, IncidentStatus, Severity
+from storage.auth_store import get_project
 from utils.id_generator import generate_incident_id
 import logging
 import secrets
@@ -41,15 +42,24 @@ class IncidentRepository:
         project_id: Optional[str] = None,
         **kwargs,
     ) -> Incident:
-        """Create a new incident with a unique alphanumeric ID and owner."""
-        # Get existing IDs to avoid collisions
-        existing_ids = {inc.incident_id for inc in self.db.query(Incident.incident_id).all()}
-        
-        # Generate unique incident ID
-        incident_id = generate_incident_id(existing_ids)
-        
+        """Create a new incident with a unique project-aware alphanumeric ID."""
         # Extract metadata from incident if present
         incident_metadata = getattr(incident, 'metadata', None)
+        effective_project_id = project_id or (
+            (incident_metadata or {}).get("project_id")
+            if isinstance(incident_metadata, dict) else None
+        )
+        project = get_project(effective_project_id) if effective_project_id else None
+        project_name = (project or {}).get("name")
+
+        # Generate a unique non-sequential ID, prefixed from the project name
+        # when the incident belongs to a known project.
+        existing_ids = {
+            inc.incident_id for inc in self.db.query(Incident.incident_id).all()
+        }
+        incident_id = generate_incident_id(existing_ids, project_name=project_name)
+        
+        # Extract GitHub metadata from custom_attributes if available
         
         # Extract GitHub metadata from custom_attributes if available
         github_repo = None
@@ -84,10 +94,7 @@ class IncidentRepository:
 
         db_incident = Incident(
             incident_id=incident_id,
-            project_id=project_id or (
-                (incident_metadata or {}).get("project_id")
-                if isinstance(incident_metadata, dict) else None
-            ),
+            project_id=effective_project_id,
             app_name=incident.app_name,
             environment=incident.environment,
             error_title=incident.error_title,

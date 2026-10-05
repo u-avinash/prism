@@ -1,0 +1,610 @@
+{
+  "info": {
+    "_postman_id": "cf3a8fd3-8f42-46ca-b844-4b33fc06f76c",
+    "name": "Prism Local Regression",
+    "description": "Synthetic local regression suite. Run scripts/seed_postman_data.py --reset before execution. No request requires a real external-provider credential.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "csrf_header",
+      "value": "X-CSRF-Token"
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const unsafe = ['POST', 'PUT', 'PATCH', 'DELETE'];",
+          "if (unsafe.includes(pm.request.method) && pm.request.url.toString().startsWith(pm.environment.get('ui_base_url'))) {",
+          "  const token = pm.environment.get('csrf_token');",
+          "  const headerName = pm.collectionVariables.get('csrf_header');",
+          "  const existing = pm.request.headers.get(headerName);",
+          "  if (token && existing !== '') pm.request.headers.upsert({ key: headerName, value: token });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "01 Bootstrap and authenticated session",
+      "item": [
+        {
+          "name": "Dashboard health",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('dashboard is healthy', () => pm.response.to.have.status(200));",
+                  "pm.test('health response is OK', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ingestion health",
+          "request": {
+            "method": "GET",
+            "url": "{{ingestion_base_url}}/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ingestion is healthy', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unauthenticated dashboard API is denied",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Cookie", "value": "" }
+            ],
+            "url": "{{ui_base_url}}/api/incidents"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('unauthenticated request is rejected or redirected', () => pm.expect([302, 401, 403]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login as tenant A team admin",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "username", "value": "{{team_admin_a_username}}" },
+                { "key": "password", "value": "{{team_admin_a_password}}" }
+              ]
+            },
+            "url": "{{ui_base_url}}/login"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('login redirects to a role home', () => pm.expect(pm.response.code).to.eql(302));",
+                  "const token = pm.cookies.get('csrf_token');",
+                  "pm.test('login supplies CSRF cookie', () => pm.expect(token).to.be.a('string').and.not.empty);",
+                  "pm.environment.set('csrf_token', token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Current user tenant project list",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/me/projects"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('tenant A is available', () => pm.response.to.have.status(200));",
+                  "pm.test('tenant B is not exposed', () => pm.expect(JSON.stringify(pm.response.json())).to.not.include(pm.environment.get('project_b_id')));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 Dashboard authorization and tenant isolation",
+      "item": [
+        {
+          "name": "List tenant A incidents",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/incidents"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('incident list succeeds', () => pm.response.to.have.status(200));",
+                  "pm.test('other tenant incident is absent', () => pm.expect(JSON.stringify(pm.response.json())).to.not.include(pm.environment.get('tenant_b_incident_id')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cross-tenant incident detail is hidden",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/incidents/{{tenant_b_incident_id}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('cross-tenant record is not disclosed', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Switch to assigned tenant A project",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"project_id\":\"{{project_a_id}}\"}"
+            },
+            "url": "{{ui_base_url}}/api/switch-project"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('assigned project can be selected', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cross-tenant project switch is denied",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"project_id\":\"{{project_b_id}}\"}"
+            },
+            "url": "{{ui_base_url}}/api/switch-project"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('unassigned project cannot be selected', () => pm.expect([403, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "CSRF protection rejects a mutating request without token",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-CSRF-Token", "value": "" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"project_id\":\"{{project_a_id}}\",\"label\":\"must-not-issue\"}"
+            },
+            "url": "{{ui_base_url}}/api/team-admin/api-keys"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('missing CSRF header is rejected', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 Project configuration and key lifecycle",
+      "item": [
+        {
+          "name": "List redacted ingestion keys",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/team-admin/api-keys?project_id={{project_a_id}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('key metadata is available', () => pm.response.to.have.status(200));",
+                  "pm.test('raw keys and digests are never listed', () => { const result = JSON.stringify(pm.response.json()); pm.expect(result).to.not.include('digest'); pm.expect(result).to.not.include('prism_'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Issue disposable ingestion key",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"project_id\":\"{{project_a_id}}\",\"label\":\"Postman disposable validation key\"}"
+            },
+            "url": "{{ui_base_url}}/api/team-admin/api-keys"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('key is issued once', () => pm.response.to.have.status(201));",
+                  "const key = pm.response.json().api_key; pm.environment.set('issued_api_key', key.key); pm.environment.set('issued_api_key_id', key.id);",
+                  "pm.test('issued key is returned once', () => pm.expect(key.key).to.match(/^prism_/));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Revoke disposable ingestion key",
+          "request": {
+            "method": "DELETE",
+            "url": "{{ui_base_url}}/api/team-admin/api-keys/{{issued_api_key_id}}?project_id={{project_a_id}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('key revocation succeeds', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read repository mappings",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/team-admin/repo-mappings?project_id={{project_a_id}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('synthetic repository mappings are readable', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 Ingestion boundaries and OTLP compatibility",
+      "item": [
+        {
+          "name": "OTLP trace acknowledgement only",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{project_a_api_key}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"name\":\"synthetic-span\",\"status\":{\"code\":2}}]}]}]}"
+            },
+            "url": "{{ingestion_base_url}}/v1/traces"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('trace payload is acknowledged', () => pm.response.to.have.status(200));",
+                  "pm.test('response is acknowledgement statistics only', () => pm.expect(pm.response.json().stats.error_spans).to.eql(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "OTLP metric acknowledgement only",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{project_a_api_key}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"resourceMetrics\":[{\"scopeMetrics\":[{\"metrics\":[{\"name\":\"synthetic.gauge\",\"gauge\":{\"dataPoints\":[]}}]}]}]}"
+            },
+            "url": "{{ingestion_base_url}}/v1/metrics"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('metric payload is acknowledged', () => pm.response.to.have.status(200));",
+                  "pm.test('metric type count is supplied', () => pm.expect(pm.response.json().stats.by_type.gauge).to.eql(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Revoked ingestion key is rejected",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{revoked_api_key}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"resourceSpans\":[]}"
+            },
+            "url": "{{ingestion_base_url}}/v1/traces"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('revoked key is forbidden', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Legacy OTLP logs route remains available",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{project_a_api_key}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"resourceLogs\":[]}"
+            },
+            "url": "{{ingestion_base_url}}/ingest/otlp"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('legacy OTLP endpoint returns supported no-incident response', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 Incident evidence, comments, audit, and recovery validation",
+      "item": [
+        {
+          "name": "Get fixture workflow runs",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/incidents/{{recovery_incident_id}}/workflow-runs"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('workflow evidence is project scoped', () => pm.response.to.have.status(200));",
+                  "pm.test('fixture run is included', () => pm.expect(JSON.stringify(pm.response.json())).to.include(pm.environment.get('workflow_run_id')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get ordered workflow step evidence",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/workflow-runs/{{workflow_run_id}}/events"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('workflow steps can be inspected', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read and add incident comment",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"content\":\"Postman synthetic regression comment\"}"
+            },
+            "url": "{{ui_base_url}}/api/incidents/{{pending_incident_id}}/comments"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('comment is created', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json(); pm.environment.set('created_comment_id', body.comment_id || body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Validate invalid recovery request",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"reason\":\"x\"}"
+            },
+            "url": "{{ui_base_url}}/api/incidents/{{recovery_incident_id}}/recover-post-approval"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('invalid recovery reason is rejected before external work', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Workflow health",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/workflow-health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('workflow health is available', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Security audit list",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/security-audit"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('security audit data is accessible to operator', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Incident CSV export",
+          "request": {
+            "method": "GET",
+            "url": "{{ui_base_url}}/api/incidents/export.csv"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('incident export succeeds', () => pm.response.to.have.status(200));",
+                  "pm.test('incident export is CSV', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('text/csv'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

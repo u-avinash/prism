@@ -31,12 +31,18 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from storage.database import ProjectIntegrationConfig, get_session as get_db_session, init_database
+from storage.database import (
+    ProjectIntegrationConfig,
+    SecurityAuditEvent,
+    get_session as get_db_session,
+    init_database,
+)
 from utils.secret_crypto import decrypt_secret, encrypt_secret
 
 # ── Storage path ────────────────────────────────────────────────────────────
@@ -53,11 +59,11 @@ _SECRET_FIELDS = {
     "slack": {"webhook_url"},
     "teams": {"webhook_url"},
     "runtime": set(),
-    "repo_mappings": set(),  # no secrets — plain JSON mapping
+    "api_keys": set(),
 }
 
 # All sections persisted in the DB config table
-_DB_CONFIG_SECTIONS = ("llm", "jira", "github", "anypoint", "slack", "teams", "runtime", "repo_mappings")
+_DB_CONFIG_SECTIONS = ("llm", "jira", "github", "anypoint", "slack", "teams", "runtime", "api_keys")
 
 # ── Default admin credentials ───────────────────────────────────────────────
 DEFAULT_ADMIN_USERNAME = os.getenv("PRISM_DEFAULT_ADMIN_USERNAME", "admin")
@@ -142,7 +148,7 @@ def _default_project_config(project_id: str) -> dict:
         "teams": {},
         "teams_notif": {},
         "runtime": {},
-        "repo_mappings": {},
+        "api_keys": [],
     }
 
 
@@ -220,6 +226,18 @@ def _save_db_project_config(project_id: str, section: str, values: dict) -> dict
     return cfg or _default_project_config(project_id)
 
 
+def _remove_obsolete_repository_mapping_data(data: dict) -> bool:
+    """Permanently discard deprecated per-project aliases and repo mappings."""
+    changed = False
+    for project in data.get("projects", []):
+        if project.pop("app_names", None) is not None:
+            changed = True
+    for config in data.get("project_configs", []):
+        if config.pop("repo_mappings", None) is not None:
+            changed = True
+    return changed
+
+
 def _migrate_legacy_project_configs(data: dict) -> bool:
     changed = False
     legacy_configs = data.get("project_configs", [])
@@ -250,7 +268,10 @@ def _load() -> dict:
         return _seed_defaults()
     with open(_AUTH_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
-    _migrate_legacy_project_configs(data)
+    changed = _remove_obsolete_repository_mapping_data(data)
+    changed = _migrate_legacy_project_configs(data) or changed
+    if changed:
+        _save(data)
     return data
 
 
@@ -462,7 +483,8 @@ def create_project(payload: dict) -> dict:
         "name": payload["name"],
         "description": payload.get("description", ""),
         "repo_url": payload.get("repo_url", ""),
-        "app_names": payload.get("app_names", []),
+        "applications": [],
+        "customer_id": payload.get("customer_id", ""),
         "stack": payload.get("stack", ""),
         "environment": payload.get("environment", "production"),
         "owner_id": "USR-ADMIN",
@@ -492,6 +514,115 @@ def update_project(project_id: str, payload: dict) -> Optional[dict]:
             _save(data)
             return p
     return None
+
+
+def _normalize_application_token(value: object) -> str:
+    """Normalize service/repository aliases for deterministic application lookup."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def list_project_applications(project_id: str) -> list[dict]:
+    """Return the explicitly registered applications for a project."""
+    project = get_project(project_id)
+    if not project:
+        return []
+    return [
+        dict(application)
+        for application in project.get("applications", [])
+        if isinstance(application, dict)
+    ]
+
+
+def get_project_application(project_id: str, identifier: str) -> Optional[dict]:
+    """Resolve an application by its ID, name, service identifier, or alias."""
+    token = _normalize_application_token(identifier)
+    if not token:
+        return None
+    for application in list_project_applications(project_id):
+        candidates = [
+            application.get("id"),
+            application.get("name"),
+            application.get("service_name"),
+            *(application.get("aliases") or []),
+        ]
+        if any(_normalize_application_token(candidate) == token for candidate in candidates):
+            return application
+    return None
+
+
+def upsert_project_application(project_id: str, payload: dict) -> Optional[dict]:
+    """Create or update a project application registration."""
+    data = _load()
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise ValueError("Application name is required")
+
+    for project in data.get("projects", []):
+        if project.get("id") != project_id:
+            continue
+
+        applications = project.setdefault("applications", [])
+        application_id = str(payload.get("id") or "").strip()
+        application = next(
+            (
+                item for item in applications
+                if item.get("id") == application_id
+                or (
+                    not application_id
+                    and _normalize_application_token(item.get("name"))
+                    == _normalize_application_token(name)
+                )
+            ),
+            None,
+        )
+        aliases = [
+            str(alias).strip()
+            for alias in (payload.get("aliases") or [])
+            if str(alias).strip()
+        ]
+        values = {
+            "name": name,
+            "aliases": list(dict.fromkeys(aliases)),
+            "technology": str(payload.get("technology") or payload.get("stack") or "").strip(),
+            "repository": str(payload.get("repository") or "").strip(),
+            "default_branch": str(payload.get("default_branch") or "").strip(),
+            "service_name": str(payload.get("service_name") or name).strip(),
+            "service_namespace": str(payload.get("service_namespace") or "").strip(),
+            "environments": list(payload.get("environments") or []),
+            "enabled": bool(payload.get("enabled", True)),
+            "description": str(payload.get("description") or "").strip(),
+            "updated_at": _now(),
+        }
+        if application:
+            application.update(values)
+        else:
+            application = {
+                "id": "APP-" + _new_id(),
+                "created_at": _now(),
+                **values,
+            }
+            applications.append(application)
+
+        _save(data)
+        return dict(application)
+    return None
+
+
+def delete_project_application(project_id: str, application_id: str) -> bool:
+    """Remove a first-class application record without deleting historical aliases."""
+    data = _load()
+    for project in data.get("projects", []):
+        if project.get("id") != project_id:
+            continue
+        before = len(project.get("applications", []))
+        project["applications"] = [
+            item for item in project.get("applications", [])
+            if item.get("id") != application_id
+        ]
+        if len(project["applications"]) != before:
+            _save(data)
+            return True
+    return False
 
 
 def delete_project(project_id: str) -> bool:
@@ -609,24 +740,157 @@ def clear_project_config(project_id: str, section: str) -> Optional[dict]:
     return _load_db_project_config(project_id, mask_secrets=False) or _default_project_config(project_id)
 
 
-def get_app_repo_mapping(project_id: str) -> dict:
-    """
-    Return the app→repo mapping dict for a project.
-    Structure: { "app-name": {"repo": "org/repo", "branch": "main", "description": ""}, ... }
-    Returns an empty dict if none configured.
-    """
-    cfg = get_project_config(project_id)
-    if not cfg:
-        return {}
-    return dict(cfg.get("repo_mappings") or {})
+def record_security_audit_event(
+    action: str,
+    *,
+    project_id: Optional[str] = None,
+    actor_type: str = "system",
+    actor_id: Optional[str] = None,
+    target_type: Optional[str] = None,
+    target_id: Optional[str] = None,
+    outcome: str = "success",
+    source_ip: Optional[str] = None,
+    details: Optional[dict] = None,
+) -> None:
+    """Persist a best-effort append-only event without exposing credentials."""
+    try:
+        with get_db_session() as session:
+            session.add(
+                SecurityAuditEvent(
+                    event_id=str(uuid.uuid4()),
+                    project_id=project_id,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    action=action,
+                    target_type=target_type,
+                    target_id=target_id,
+                    outcome=outcome,
+                    source_ip=source_ip,
+                    details=details or {},
+                )
+            )
+    except Exception:
+        # A security event must not make an ingestion request or an emergency
+        # key revocation unavailable if audit storage is temporarily unhealthy.
+        pass
 
 
-def set_app_repo_mapping(project_id: str, mappings: dict) -> dict:
-    """
-    Overwrite the full app→repo mapping for a project.
-    mappings: { "app-name": {"repo": "org/repo", "branch": "main", "description": ""}, ... }
-    """
-    return update_project_config(project_id, "repo_mappings", mappings) or {}
+def _api_key_digest(api_key: str) -> str:
+    """Return a stable non-reversible digest for an ingestion API key."""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+
+def _get_api_key_records(config: dict) -> list[dict]:
+    """Support the persisted section wrapper and temporary legacy list form."""
+    section = (config or {}).get("api_keys") or {}
+    if isinstance(section, list):
+        return [entry for entry in section if isinstance(entry, dict)]
+    if isinstance(section, dict):
+        return [
+            entry for entry in (section.get("api_keys") or [])
+            if isinstance(entry, dict)
+        ]
+    return []
+
+
+def create_project_api_key(project_id: str, label: str, expires_at: Optional[str] = None) -> dict:
+    """Create an ingestion key and persist only its digest; raw key is returned once."""
+    raw_key = "prism_" + secrets.token_urlsafe(32)
+    record = {
+        "id": "KEY-" + _new_id(),
+        "label": (label or "Ingestion key").strip()[:100],
+        "digest": _api_key_digest(raw_key),
+        "created_at": _now(),
+        "expires_at": expires_at,
+        "revoked_at": None,
+        "last_used_at": None,
+    }
+    cfg = get_project_config(project_id) or _default_project_config(project_id)
+    records = _get_api_key_records(cfg)
+    records.append(record)
+    update_project_config(project_id, "api_keys", {"api_keys": records})
+    record_security_audit_event(
+        "api_key.created",
+        project_id=project_id,
+        target_type="api_key",
+        target_id=record["id"],
+        details={"label": record["label"], "expires_at": expires_at},
+    )
+    return {**record, "key": raw_key}
+
+
+def list_project_api_keys(project_id: str) -> list[dict]:
+    """Return API-key metadata, never raw key values or digests."""
+    cfg = get_project_config(project_id) or {}
+    return [
+        {k: v for k, v in entry.items() if k not in {"key", "digest"}}
+        for entry in _get_api_key_records(cfg)
+    ]
+
+
+def revoke_project_api_key(project_id: str, key_id: str) -> bool:
+    """Revoke a key without deleting its audit-relevant lifecycle record."""
+    cfg = get_project_config(project_id) or _default_project_config(project_id)
+    records = _get_api_key_records(cfg)
+    found = False
+    for record in records:
+        if isinstance(record, dict) and record.get("id") == key_id and not record.get("revoked_at"):
+            record["revoked_at"] = _now()
+            found = True
+    if found:
+        update_project_config(project_id, "api_keys", {"api_keys": records})
+        record_security_audit_event(
+            "api_key.revoked",
+            project_id=project_id,
+            target_type="api_key",
+            target_id=key_id,
+        )
+    return found
+
+
+def verify_project_api_key(project_id: str, api_key: str) -> Optional[dict]:
+    """Verify an active, unexpired hashed key and record its last use."""
+    cfg = get_project_config(project_id) or {}
+    records = _get_api_key_records(cfg)
+    candidate_digest = _api_key_digest(api_key)
+    now = datetime.now(timezone.utc)
+    matched: Optional[dict] = None
+
+    for record in records:
+        if not isinstance(record, dict) or record.get("revoked_at"):
+            continue
+        expires_at = record.get("expires_at")
+        if expires_at:
+            try:
+                expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                if expiry <= now:
+                    continue
+            except ValueError:
+                continue
+        digest = record.get("digest")
+        # Legacy plaintext entries remain valid only for migration compatibility.
+        legacy_key = record.get("key")
+        if (digest and hmac.compare_digest(str(digest), candidate_digest)) or (
+            legacy_key and hmac.compare_digest(str(legacy_key), api_key)
+        ):
+            record["last_used_at"] = _now()
+            matched = dict(record)
+            break
+
+    if matched:
+        update_project_config(project_id, "api_keys", {"api_keys": records})
+        record_security_audit_event(
+            "api_key.used",
+            project_id=project_id,
+            actor_type="api_key",
+            actor_id=matched.get("id"),
+            target_type="ingestion",
+            details={"label": matched.get("label")},
+        )
+        return {k: v for k, v in matched.items() if k not in {"key", "digest"}}
+    return None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -688,6 +952,7 @@ def create_session(user: dict) -> str:
         "role": user.get("role", "user"),
         "email": user.get("email", ""),
         "features": user.get("features", ["dashboard", "incidents"]),
+        "csrf_token": secrets.token_urlsafe(32),
         "created_at": _now(),
         "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=_SESSION_TTL_SECONDS)).isoformat(),
     }

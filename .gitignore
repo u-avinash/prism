@@ -79,3 +79,4 @@ start-all-applications.bat
 
 # graphify-axet
 .graphify/
+demo/.env
