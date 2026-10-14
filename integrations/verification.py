@@ -20,10 +20,20 @@ settings = get_settings()
 
 # Most LLM SDKs use httpx/OpenSSL directly rather than requests. Expose the
 # same enterprise CA bundle to those libraries before they construct clients.
+# Only inject the env vars when the file actually exists; setting them to a
+# non-existent path poisons OpenSSL and causes FileNotFoundError deep in the
+# SSL layer even when verify=False is passed to requests.
 if settings.trusted_ca_bundle:
     _configured_ca_bundle = str(Path(settings.trusted_ca_bundle).expanduser())
-    os.environ.setdefault("SSL_CERT_FILE", _configured_ca_bundle)
-    os.environ.setdefault("REQUESTS_CA_BUNDLE", _configured_ca_bundle)
+    if Path(_configured_ca_bundle).is_file():
+        os.environ.setdefault("SSL_CERT_FILE", _configured_ca_bundle)
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", _configured_ca_bundle)
+    else:
+        logger.warning(
+            "PRISM_TRUSTED_CA_BUNDLE path '%s' does not exist; "
+            "SSL_CERT_FILE / REQUESTS_CA_BUNDLE will not be set.",
+            _configured_ca_bundle,
+        )
 
 
 class IntegrationVerificationError(ValueError):
@@ -111,7 +121,17 @@ def request(
 
     kwargs.setdefault("timeout", timeout)
     kwargs.setdefault("verify", verify)
-    return requests.request(method, url, **kwargs)
+    try:
+        return requests.request(method, url, **kwargs)
+    except OSError as exc:
+        # On Windows with Python 3.13+, a missing or mis-configured CA bundle
+        # (SSL_CERT_FILE env var pointing to a non-existent file) can surface as
+        # a bare FileNotFoundError deep in ssl._sslobj.read() rather than as a
+        # requests.SSLError.  Wrap it so callers receive a consistent
+        # requests.ConnectionError that their except-blocks already handle.
+        raise requests.ConnectionError(
+            f"OS-level SSL error contacting {url}: {exc}"
+        ) from exc
 
 
 def connection_error(integration: str, exc: requests.SSLError) -> IntegrationVerificationError:

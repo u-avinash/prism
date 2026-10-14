@@ -229,7 +229,7 @@
     $("saveCustomer").addEventListener("click", () => {
       const name = $("custName").value.trim();
       if (!name) { $("custName").focus(); return; }
-      alert(`Customer "${name}" added! (demo)`);
+      window.prism.alert(`Customer "${name}" added! (demo)`);
       modal.style.display = "none";
       $("customerForm").reset();
     });

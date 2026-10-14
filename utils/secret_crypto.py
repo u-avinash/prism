@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
 from pathlib import Path
 
@@ -27,7 +28,19 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from config.settings import get_settings
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+class SecretDecryptionError(Exception):
+    """
+    Raised when a stored integration secret cannot be decrypted.
+
+    This is distinguished from "not configured" (empty/None value) so callers
+    can alert administrators about a likely key-mismatch/corruption instead of
+    silently treating the integration as unconfigured.
+    """
+    pass
 
 
 def _get_key_material() -> bytes:
@@ -65,11 +78,31 @@ def encrypt_secret(value: str | None) -> str | None:
 
 
 def decrypt_secret(value: str | None) -> str | None:
+    """
+    Decrypt a stored integration secret.
+
+    Raises:
+        SecretDecryptionError: if the value cannot be decrypted (e.g., due to
+            key rotation without data re-encryption, or data corruption).
+            Callers should catch this specifically to distinguish "misconfigured
+            encryption key" from "not configured" (empty/None value) and alert
+            administrators accordingly, rather than silently treating the
+            integration as unconfigured.
+    """
     if value is None:
         return None
     if value == "":
         return ""
     try:
         return _build_fernet().decrypt(value.encode("utf-8")).decode("utf-8")
-    except (InvalidToken, ValueError):
-        return value
+    except (InvalidToken, ValueError) as exc:
+        logger.error(
+            "Failed to decrypt integration secret — likely key rotation/mismatch "
+            "or data corruption. Raising SecretDecryptionError instead of silently "
+            "returning the raw ciphertext."
+        )
+        raise SecretDecryptionError(
+            "Unable to decrypt stored secret. The configured INTEGRATION_SECRET_KEY "
+            "may not match the key used to encrypt this value (e.g., after key "
+            "rotation), or the stored value is corrupted."
+        ) from exc

@@ -125,9 +125,25 @@ def generate_fix_node(state: AgentState) -> AgentState:
                 if code_context:
                     logger.info(f"[Fix Generation] ✓ Code fetched successfully ({code_context['line_count']} lines)")
                 else:
-                    logger.warning(f"[Fix Generation] ✗ Code fetch returned None")
+                    logger.warning(f"[Fix Generation] ✗ Code fetch returned None — GitHub repo may be inaccessible or file path incorrect")
+                    # Surface the GitHub access failure as a diagnostic message
+                    if not code_fetcher.github_client:
+                        github_diag = f"⚠️ GitHub not configured for project '{state.get('project_id')}' — fix generated without code context"
+                    else:
+                        github_diag = (
+                            f"⚠️ GitHub repo access failed: could not fetch '{error_file_path}' "
+                            f"from '{repo_full_name}'. "
+                            f"Check GitHub token and repo/file path in Project Configuration."
+                        )
+                    state['messages'] = state.get('messages', []) + [github_diag]
+                    logger.warning(f"[Fix Generation] {github_diag}")
             except Exception as fetch_error:
                 logger.error(f"[Fix Generation] ✗ Code fetch failed: {fetch_error}")
+                github_diag = (
+                    f"⚠️ GitHub access error for '{repo_full_name}/{error_file_path}': {fetch_error}. "
+                    f"Falling back to error-context-only fix."
+                )
+                state['messages'] = state.get('messages', []) + [github_diag]
 
         # Fetch MuleSoft project context only for MuleSoft/Java apps (all XML + DWL)
         project_files: dict = {}
@@ -139,7 +155,24 @@ def generate_fix_node(state: AgentState) -> AgentState:
                 logger.warning(f"[Fix Generation] Could not fetch project context: {ctx_err}")
         elif not repo_full_name:
             logger.warning(f"[Fix Generation] ✗ Missing GitHub metadata (repo={repo_full_name}, file={error_file_path})")
-        
+            if error_file_path:
+                # File path was extracted from telemetry correctly — only the repo is
+                # missing, which means the GitHub repo was inaccessible (404) or the
+                # application has no registered owner/repository mapping.
+                state['messages'] = state.get('messages', []) + [
+                    f"⚠️ GitHub repository could not be resolved for '{state.get('app_name', 'unknown')}' "
+                    f"(file path '{error_file_path}' was detected). "
+                    f"Register the application with its owner/repository in Team Admin → Applications, "
+                    f"or verify the GitHub token has Contents: Read access to the repository."
+                ]
+            else:
+                state['messages'] = state.get('messages', []) + [
+                    f"⚠️ GitHub metadata missing: repo_full_name='{repo_full_name}', "
+                    f"error_file_path='{error_file_path}'. "
+                    f"Ensure the incident telemetry includes repository information or "
+                    f"register the application in Team Admin → Applications."
+                ]
+
         if not code_context:
             logger.warning("[Fix Generation] Could not fetch code from GitHub, using fallback approach")
             # Generate fix based on error information alone
@@ -612,14 +645,26 @@ def _generate_fallback_fix(
     
     try:
         fix_prompt = prompts.get('code_fix_generation', '')
-        
-        # Create fallback prompt that doesn't require code
-        fallback_prompt = f"""You are an expert software engineer. Generate a fix for this error without access to the actual code.
+
+        # Build error context from metadata if available
+        metadata = state.get('metadata') or {}
+        source_technology = metadata.get('source_technology', 'unknown')
+        detected_framework = metadata.get('detected_framework') or ''
+        tech_display = source_technology + (f'/{detected_framework}' if detected_framework else '')
+
+        # Create fallback prompt using the SAME targeted fix format as the main path.
+        # The LLM can infer the problematic code from the error message / stack trace
+        # and provide both an Original Code block and a Fixed Code block so the patch
+        # generator and UI diff viewer can produce a real before-vs-after comparison.
+        fallback_prompt = f"""You are an expert software engineer. Generate a targeted fix for this error.
+The actual source file could not be fetched, so you must INFER what the buggy code looks like
+from the error message and stack trace, then provide the fix.
 
 ## Error Details
 **Application:** {state.get('app_name', 'Unknown')}
 **Environment:** {state.get('environment', 'Unknown')}
 **Error Title:** {state.get('error_title', 'Unknown')}
+**Technology Stack:** {tech_display or 'Unknown'}
 **File:** {error_file_path or 'Unknown'}
 **Line:** {error_line_number or 'Unknown'}
 **File Type:** {error_file_type or 'Unknown'}
@@ -636,45 +681,59 @@ def _generate_fallback_fix(
 {rca_summary}
 
 ## Your Task
-Since the actual code is not available, provide:
+Infer the exact lines that caused this error from the stack trace / error message above,
+then show the original buggy version alongside the fixed version.
 
-1. **Conceptual Fix**: Describe what needs to be changed and why
-2. **Code Template**: Provide a code template/example showing the fix
-3. **Step-by-Step Instructions**: Clear steps to implement the fix
-4. **Common Patterns**: Show common fix patterns for this type of error
+**CRITICAL INSTRUCTIONS — TARGETED FIX APPROACH:**
+1. **Infer the EXACT lines that are buggy** from the stack trace / error message
+2. **Show ONLY those specific lines with context** (not the entire file)
+3. **Include 3-5 context lines** before and after to locate the position
+4. **The Original Code block MUST contain the actual buggy pattern** visible in the error
+5. **Be minimal** — only change what is necessary to fix the error
+6. **The fix must be production-ready and safe**
 
-**Output Format:**
-## Conceptual Fix
-[Description of what needs to be fixed]
+**REQUIRED Output Format (MUST MATCH THIS EXACTLY):**
 
-## Code Template
+**Original Code (with context):**
 ```{error_file_type or 'code'}
-[Example code showing the fix pattern]
+[3-5 lines of context BEFORE the buggy code]
+[The EXACT buggy lines inferred from the error / stack trace]
+[3-5 lines of context AFTER the buggy code]
 ```
 
-## Implementation Steps
-1. [Step 1]
-2. [Step 2]
-...
+**Fixed Code (with same context):**
+```{error_file_type or 'code'}
+[Same 3-5 context lines BEFORE]
+[The FIXED version of the buggy lines]
+[Same 3-5 context lines AFTER]
+```
 
 ## Explanation
-[Why this fix resolves the issue]
+[Explain precisely what was wrong and why the fix resolves the issue]
 """
-        
+
         # Generate fix
-        logger.info(f"[Fix Generation] Calling LLM for fallback fix")
+        logger.info(f"[Fix Generation] Calling LLM for fallback fix (targeted format)")
         fix_response = llm_provider.invoke(
             prompt=fallback_prompt,
-            system_message=f"You are an expert in {error_file_type or 'software engineering'}. Provide clear, actionable fix guidance.",
-            temperature=0.4
+            system_message=(
+                f"You are an expert in {error_file_type or 'software engineering'} and {tech_display or 'software development'}. "
+                "Generate precise, targeted fixes that show Original Code vs Fixed Code blocks. "
+                "Always infer the buggy code pattern from the error message and stack trace."
+            ),
+            temperature=0.3,
         )
-        
-        # Parse response
-        proposed_fix, fix_explanation = _parse_fix_response(fix_response, error_file_type or 'code')
-        
+
+        # Keep the FULL LLM response as proposed_fix — same as the main path.
+        # The patch generator and UI diff viewer need both Original and Fixed code blocks,
+        # which are embedded in the full response.  Parsing/stripping them here destroys
+        # the structure that downstream consumers depend on.
+        proposed_fix = fix_response
+        fix_explanation = _extract_explanation(fix_response)
+
         # Validate safety
         safety_check, concerns = _validate_fix_safety(proposed_fix)
-        
+
         # Update state
         state['proposed_fix'] = proposed_fix
         state['fix_explanation'] = fix_explanation
@@ -752,11 +811,53 @@ Since the actual code is not available, provide:
         logger.info(f"[Fix Generation] Fallback fix generated for {state['incident_id']}")
         
     except Exception as e:
-        logger.error(f"[Fix Generation] Fallback approach failed: {str(e)}")
+        error_text = str(e)
+        logger.error(f"[Fix Generation] Fallback approach failed: {error_text}")
+
+        # Classify the error to give a more actionable message
+        lower_err = error_text.lower()
+        if any(t in lower_err for t in ("rate", "429", "quota", "too many requests", "overloaded", "resource_exhausted")):
+            user_message = (
+                f"Fix generation failed: LLM provider rate limit hit (429 Too Many Requests). "
+                f"The provider is temporarily throttling requests. "
+                f"Please wait a moment and try again, or configure a fallback LLM provider in "
+                f"Team Admin → Project Configuration → LLM → Fallback Providers. "
+                f"Detail: {error_text}"
+            )
+        elif any(t in lower_err for t in ("auth", "api key", "401", "403", "unauthorized")):
+            user_message = (
+                f"Fix generation failed: LLM authentication error. "
+                f"Check the API key in Team Admin → Project Configuration → LLM. "
+                f"Detail: {error_text}"
+            )
+        elif any(t in lower_err for t in ("timeout", "timed out", "connection")):
+            user_message = (
+                f"Fix generation failed: LLM provider connection timeout. "
+                f"The provider may be temporarily unavailable. Please retry. "
+                f"Detail: {error_text}"
+            )
+        else:
+            user_message = f"Fix generation failed: {error_text}"
+
         state['proposed_fix'] = None
-        state['fix_explanation'] = f"Fix generation failed: {str(e)}"
-        state['messages'] = state.get('messages', []) + [
-            f"❌ Fix generation failed: {str(e)}"
-        ]
-    
+        state['fix_explanation'] = user_message
+        state['error_message'] = user_message
+        state['messages'] = state.get('messages', []) + [f"❌ {user_message}"]
+
+        # Persist error state to DB so UI shows the correct error details
+        try:
+            from storage.database import get_session
+            from storage.incident_repository import IncidentRepository
+            with get_session() as session:
+                repo = IncidentRepository(session)
+                repo.update(
+                    incident_id=state['incident_id'],
+                    current_workflow_node='generate_fix_failed',
+                    error_message=user_message,
+                    fix_explanation=user_message,
+                    proposed_fix=None,
+                )
+        except Exception as db_err:
+            logger.warning(f"[Fix Generation] Failed to persist fallback error to DB: {db_err}")
+
     return state

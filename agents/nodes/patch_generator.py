@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+_CODE_BLOCK_PATTERN = r"```[^\n`]*\r?\n(.*?)\r?\n```"
+
+
 def _validate_patch_format(patch_content: str) -> bool:
     """
     Validate that a patch file has proper format with correct line breaks.
@@ -120,7 +123,24 @@ def generate_patch_file_node(state: AgentState) -> AgentState:
                 )
             state['messages'] = state.get('messages', []) + ["⚠️ No file path and no proposed fix available for patch"]
             return state
-        
+
+        # Conceptual fixes (GitHub not accessible) use only the LLM's inferred code
+        # blocks — the placeholder original_code is not real source, so calling
+        # _apply_targeted_fix against it always fails (ratio 0.00).  Skip straight
+        # to _create_conceptual_fix_document which diffs the two LLM blocks directly.
+        if state.get('fix_type') == 'conceptual':
+            logger.info(
+                f"[Patch Generation] Conceptual fix detected for incident {incident_id} "
+                "(no GitHub source code); generating block-level diff patch directly"
+            )
+            return _create_conceptual_fix_document(
+                state=state,
+                incident_id=incident_id,
+                proposed_fix=proposed_fix,
+                fix_explanation=fix_explanation or 'Auto-generated fix',
+                error_file_path=error_file_path,
+            )
+
         # NEW: Apply targeted fix to original code to create complete fixed version
         # The LLM now returns only the changed lines, not the entire file
         # We need to intelligently merge the fix into the original code
@@ -132,7 +152,7 @@ def generate_patch_file_node(state: AgentState) -> AgentState:
         if not fixed_code:
             # Could not match the targeted fix to the original code via _apply_targeted_fix.
             # Extract the two code blocks from the LLM response and diff them directly.
-            code_blocks = re.findall(r'```(?:\w+)?\n(.*?)\n```', proposed_fix, re.DOTALL)
+            code_blocks = re.findall(_CODE_BLOCK_PATTERN, proposed_fix, re.DOTALL)
             if len(code_blocks) >= 2:
                 original_block = code_blocks[0].strip()
                 fixed_block = code_blocks[1].strip()
@@ -225,72 +245,18 @@ def generate_patch_file_node(state: AgentState) -> AgentState:
             diff_lines = list(diff)
             diff_content = ''.join(diff_lines)
 
-        # Clean up the diff - remove multi-line comment blocks that confuse Studio
-        diff_content = re.sub(r'\+/\*\s*\n', '', diff_content)
-        diff_content = re.sub(r'\+\s*\*/\s*\n', '', diff_content)
-        diff_content = re.sub(r'\+\s*\*[^/\n]*\n', '', diff_content)
-        
-        # Validate patch format to ensure it's properly formatted
+        # Validate the raw unified diff before writing it.  A .patch artifact must
+        # contain only patch syntax: appending prose (especially multi-line RCA or
+        # explanation text) produces an artifact that `git apply` cannot parse.
         if not _validate_patch_format(diff_content):
             logger.error(f"[Patch Generation] Generated patch has invalid format for incident {incident_id}")
             raise ValueError("Generated patch file has invalid format (missing line breaks in headers)")
         
-        # Create comprehensive patch file with universal instructions
-        patch_content = f"""{diff_content}
-
-# ============================================================================
-# Patch Information
-# ============================================================================
-# Incident ID: {incident_id}
-# Application: {state.get('app_name', 'Unknown')}
-# Environment: {state.get('environment', 'Unknown')}
-# Severity: {state.get('severity', 'Unknown')}
-# Repository: {state.get('repo_full_name', 'Unknown')}
-# File: {error_file_path}
-# Generated: {datetime.utcnow().isoformat()}
-# Format: Universal (works with both Git and Anypoint Studio)
-#
-# Root Cause Analysis:
-# {state.get('rca_text', 'N/A')[:500]}...
-#
-# Fix Explanation:
-# {fix_explanation[:500]}...
-#
-# ============================================================================
-# How to Apply This Patch (Universal - Works for Git and Studio)
-# ============================================================================
-#
-# OPTION 1: Anypoint Studio (GUI Method)
-# ----------------------------------------
-# 1. In Package Explorer, right-click on your project
-# 2. Select "Team" → "Apply Patch..."
-# 3. Choose "File" option
-# 4. Browse to this patch file
-# 5. Keep "Ignore leading path name segments" at 0 (default)
-# 6. Click "Next" to preview changes
-# 7. Review the changes in the diff view
-# 8. Click "Finish" to apply
-#
-# OPTION 2: Git Command Line
-# ----------------------------
-# From the root of your repository, run:
-#   git apply -p0 {patch_filename}
-#
-# Note: The -p0 flag tells git not to strip any path components
-#
-# OPTION 3: Standard Patch Command
-# ----------------------------------
-# From the root of your repository, run:
-#   patch -p0 < {patch_filename}
-#
-# OPTION 4: Manual Application
-# ------------------------------
-# - Review the diff above
-# - Apply changes to {error_file_path}
-# - Test thoroughly before committing
-#
-# ============================================================================
-"""
+        # Keep this artifact strictly applyable by Git, `patch`, and Studio.
+        # Incident RCA and fix explanation are persisted separately in the DB/UI.
+        patch_content = diff_content
+        if not patch_content.endswith("\n"):
+            patch_content += "\n"
         
         # Write patch file
         with open(patch_path, 'w', encoding='utf-8') as f:
@@ -445,7 +411,7 @@ def _apply_targeted_fix(original_code: str, proposed_fix: str, state: AgentState
     logger.info(f"[Patch Generation] Applying targeted fix to original code")
     
     try:
-        code_blocks = re.findall(r'```(?:\w+)?\n(.*?)\n```', proposed_fix, re.DOTALL)
+        code_blocks = re.findall(_CODE_BLOCK_PATTERN, proposed_fix, re.DOTALL)
         
         if len(code_blocks) >= 2:
             original_block = code_blocks[0].strip()
@@ -546,7 +512,7 @@ def _create_conceptual_fix_document(
         patch_path = patch_dir / patch_filename
 
         # Extract code blocks from the LLM response
-        code_blocks = re.findall(r'```(?:\w+)?\n(.*?)\n```', proposed_fix, re.DOTALL)
+        code_blocks = re.findall(_CODE_BLOCK_PATTERN, proposed_fix, re.DOTALL)
         original_block = (code_blocks[0].strip() if len(code_blocks) >= 1 else "").splitlines(keepends=True)
         fixed_block    = (code_blocks[1].strip() if len(code_blocks) >= 2 else
                           code_blocks[0].strip() if len(code_blocks) == 1 else "").splitlines(keepends=True)
@@ -567,29 +533,11 @@ def _create_conceptual_fix_document(
             f"# No diff available\n# File: {error_file_path}\n"
         )
 
-        patch_content = f"""{diff_content}
-# ============================================================================
-# Patch Information (Conceptual Fix - original code was not fetched)
-# ============================================================================
-# Incident ID: {incident_id}
-# Application: {state.get('app_name', 'Unknown')}
-# Environment: {state.get('environment', 'Unknown')}
-# Severity:    {state.get('severity', 'Unknown')}
-# Repository:  {state.get('repo_full_name', 'Unknown')}
-# File:        {error_file_path or 'Unknown'}
-# Generated:   {datetime.utcnow().isoformat()}
-#
-# NOTE: This patch was generated without direct access to the repository.
-#       Review and adapt before applying.
-#
-# Fix Explanation:
-# {fix_explanation[:500]}
-#
-# How to apply:
-#   git apply {patch_filename}
-#   patch -p0 < {patch_filename}
-# ============================================================================
-"""
+        # A conceptual patch must also remain pure unified-diff content.  Metadata
+        # belongs in the incident record; prose after a hunk breaks `git apply`.
+        patch_content = diff_content
+        if not patch_content.endswith("\n"):
+            patch_content += "\n"
 
         with open(patch_path, 'w', encoding='utf-8') as f:
             f.write(patch_content)

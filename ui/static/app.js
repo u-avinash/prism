@@ -129,6 +129,7 @@
    * ───────────────────────────────────────────────────────────────────── */
 
   prism.confirm = function (options) {
+    options = options || {};
     const overlay = document.getElementById('modalOverlay');
     const modalBox = document.getElementById('modalBox');
     const title = document.getElementById('modalTitle');
@@ -138,14 +139,17 @@
     const closeButton = document.getElementById('modalClose');
 
     if (!overlay || !title || !body || !confirmButton || !cancelButton || !closeButton) {
-      return Promise.resolve(window.confirm(options.message || 'Are you sure?'));
+      return Promise.resolve(
+        options.alertMode ? (window.alert(options.message || ''), true) : window.confirm(options.message || 'Are you sure?')
+      );
     }
 
     const previousFocus = document.activeElement;
-    title.textContent = options.title || 'Confirm action';
+    title.textContent = options.title || (options.alertMode ? 'Notice' : 'Confirm action');
     body.textContent = options.message || 'Are you sure you want to continue?';
-    confirmButton.textContent = options.confirmLabel || 'Confirm';
+    confirmButton.textContent = options.confirmLabel || (options.alertMode ? 'OK' : 'Confirm');
     confirmButton.className = 'btn ' + (options.danger ? 'btn-danger' : 'btn-primary');
+    cancelButton.hidden = !!options.alertMode;
     overlay.hidden = false;
     overlay.setAttribute('aria-hidden', 'false');
     confirmButton.focus();
@@ -158,6 +162,7 @@
         settled = true;
         overlay.hidden = true;
         overlay.setAttribute('aria-hidden', 'true');
+        cancelButton.hidden = false;
         document.removeEventListener('keydown', onKeydown);
         overlay.removeEventListener('click', onOverlayClick);
         confirmButton.removeEventListener('click', onConfirm);
@@ -170,11 +175,11 @@
       }
 
       function onConfirm() { finish(true); }
-      function onCancel() { finish(false); }
+      function onCancel() { finish(options.alertMode ? true : false); }
       function onKeydown(event) {
         if (event.key === 'Escape') {
           event.preventDefault();
-          finish(false);
+          finish(options.alertMode ? true : false);
           return;
         }
 
@@ -199,7 +204,7 @@
       }
 
       function onOverlayClick(event) {
-        if (event.target === overlay) finish(false);
+        if (event.target === overlay) finish(options.alertMode ? true : false);
       }
 
       confirmButton.addEventListener('click', onConfirm);
@@ -207,6 +212,22 @@
       closeButton.addEventListener('click', onCancel);
       overlay.addEventListener('click', onOverlayClick);
       document.addEventListener('keydown', onKeydown);
+    });
+  };
+
+  /**
+   * Show a themed alert (single-button) modal in place of window.alert.
+   * @param {string|object} options  Message string, or options object
+   *        { title, message, okLabel }
+   * @returns {Promise<boolean>} Resolves true once dismissed.
+   */
+  prism.alert = function (options) {
+    options = typeof options === 'string' ? { message: options } : (options || {});
+    return prism.confirm({
+      title: options.title,
+      message: options.message,
+      confirmLabel: options.okLabel || options.confirmLabel || 'OK',
+      alertMode: true,
     });
   };
 
@@ -498,6 +519,36 @@
   }
 
   /* ─────────────────────────────────────────────────────────────────────
+   * 8b. THEME TOGGLE (dark / light)
+   * ───────────────────────────────────────────────────────────────────── */
+
+  function initThemeToggle() {
+    const btn = document.getElementById('themeToggle');
+    const icon = document.getElementById('themeToggleIcon');
+    if (!btn) return;
+
+    var moonPath = 'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z';
+    var sunPath = 'M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10Z';
+    function applyIcon(theme) {
+      if (icon) {
+        var path = icon.querySelector('path');
+        if (path) path.setAttribute('d', theme === 'dark' ? sunPath : moonPath);
+      }
+      btn.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+    }
+
+    applyIcon(document.documentElement.getAttribute('data-theme') || 'light');
+
+    btn.addEventListener('click', function () {
+      const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+      const next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      applyIcon(next);
+      try { localStorage.setItem('prism-theme', next); } catch (e) { /* ignore */ }
+    });
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
    * 9. SIDEBAR TOGGLE (mobile)
    * ───────────────────────────────────────────────────────────────────── */
 
@@ -621,6 +672,7 @@
     });
 
     initRefreshBtn();
+    initThemeToggle();
     initSwitchers();
     initSidebar();
     initApprovalForm();

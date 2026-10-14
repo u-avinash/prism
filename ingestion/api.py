@@ -132,7 +132,22 @@ def _validate_api_key(
 
     token = authorization[len("Bearer "):].strip()
     if not token:
-        raise HTTPException(status_code=401, detail="API key is empty")
+        # Empty Bearer token — treat as no auth (e.g., PRISM_OTLP_EXPORT_API_KEY env var not set
+        # in the OTEL collector config, which sends "Bearer " with an empty value).
+        if settings.effective_ingestion_auth_required:
+            raise HTTPException(
+                status_code=401,
+                detail="Authorization: Bearer <project API key> is required for ingestion",
+            )
+        if not settings.effective_allow_unassigned_ingestion:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Unassigned ingestion is disabled. Supply a project API key "
+                    "using Authorization: Bearer <project API key>."
+                ),
+            )
+        return None
 
     try:
         from storage.auth_store import list_projects, verify_project_api_key
@@ -393,6 +408,153 @@ def _check_recurring_pattern(
         return False
 
 
+# ---------------------------------------------------------------------------
+# Sequential FIFO processing queue (per-project)
+# ---------------------------------------------------------------------------
+
+# Per-project asyncio queues for sequential FIFO incident processing.
+# Key: project_id (or "__global__" when no project is assigned).
+_SEQUENTIAL_QUEUES: Dict[str, asyncio.Queue] = {}
+
+# Tracks which project keys currently have an active worker coroutine running.
+# Because asyncio is single-threaded at the event-loop level the check+set
+# of this dict is race-free — no lock required.
+_WORKER_RUNNING: Dict[str, bool] = {}
+
+
+def _get_project_processing_mode(project_id: Optional[str]) -> str:
+    """
+    Return the LLM processing mode configured for a project.
+
+    Returns
+    -------
+    'sequential'
+        Incidents are queued per-project and processed one at a time in FIFO
+        order.  The LLM is never invoked concurrently for the same project.
+    'parallel'  (default)
+        Each incident is dispatched immediately to a thread-pool worker —
+        the original behaviour before this feature was added.
+    """
+    if not project_id:
+        return "parallel"
+    try:
+        from storage.auth_store import get_project_config
+        config = get_project_config(project_id) or {}
+        runtime = config.get("runtime") or {}
+        return str(runtime.get("llm_processing_mode") or "parallel").lower()
+    except Exception as exc:
+        logger.debug(
+            "[ProcessingMode] Could not read config for project %s: %s", project_id, exc
+        )
+        return "parallel"
+
+
+async def _sequential_queue_worker(project_key: str) -> None:
+    """
+    FIFO worker coroutine — drains the per-project incident queue one item at
+    a time, then exits.
+
+    The worker exits as soon as the queue is empty.  The next incident that
+    arrives for the same project will restart it via
+    _start_or_enqueue_sequential().
+
+    Args:
+        project_key: The key used in ``_SEQUENTIAL_QUEUES`` / ``_WORKER_RUNNING``
+                     (equal to project_id or "__global__").
+    """
+    queue = _SEQUENTIAL_QUEUES.get(project_key)
+    if not queue:
+        _WORKER_RUNNING[project_key] = False
+        return
+
+    loop = asyncio.get_event_loop()
+    processed = 0
+    logger.info("[Queue/Sequential] Worker started for project '%s'", project_key)
+
+    try:
+        while not queue.empty():
+            incident_id, project_id = await queue.get()
+            logger.info(
+                "[Queue/Sequential] Processing incident %s (position %d in queue) project=%s",
+                incident_id,
+                processed + 1,
+                project_key,
+            )
+            try:
+                await loop.run_in_executor(
+                    None, _run_workflow_in_thread, incident_id, project_id
+                )
+                processed += 1
+                logger.info(
+                    "[Queue/Sequential] Incident %s completed. "
+                    "Total processed for project '%s': %d",
+                    incident_id,
+                    project_key,
+                    processed,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[Queue/Sequential] Incident %s failed: %s", incident_id, exc
+                )
+            finally:
+                queue.task_done()
+    finally:
+        _WORKER_RUNNING[project_key] = False
+        logger.info(
+            "[Queue/Sequential] Worker exited for project '%s'. Processed %d incident(s).",
+            project_key,
+            processed,
+        )
+
+
+async def _start_or_enqueue_sequential(
+    incident_id: str,
+    project_id: Optional[str],
+) -> None:
+    """
+    Add *incident_id* to the project's FIFO queue and ensure a worker coroutine
+    is consuming it.
+
+    If no worker is currently active for this project a new asyncio Task is
+    created immediately.  Any subsequent incidents that arrive while the worker
+    is busy are simply appended to the queue and processed in order without
+    starting additional workers.
+
+    Args:
+        incident_id: 4-character alphanumeric incident ID.
+        project_id:  Project owning this incident (may be None).
+    """
+    key = project_id or "__global__"
+
+    if key not in _SEQUENTIAL_QUEUES:
+        _SEQUENTIAL_QUEUES[key] = asyncio.Queue()
+
+    await _SEQUENTIAL_QUEUES[key].put((incident_id, project_id))
+    queue_depth = _SEQUENTIAL_QUEUES[key].qsize()
+
+    logger.info(
+        "[Queue/Sequential] Incident %s enqueued for project '%s' "
+        "(current queue depth: %d)",
+        incident_id,
+        key,
+        queue_depth,
+    )
+
+    if not _WORKER_RUNNING.get(key, False):
+        _WORKER_RUNNING[key] = True
+        asyncio.create_task(_sequential_queue_worker(key))
+        logger.info(
+            "[Queue/Sequential] New worker task created for project '%s'", key
+        )
+    else:
+        logger.info(
+            "[Queue/Sequential] Worker already active for project '%s' — "
+            "incident %s will be processed in turn.",
+            key,
+            incident_id,
+        )
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Prism Ingestion API",
@@ -566,91 +728,126 @@ async def record_request_middleware(request: Request, call_next):
             pass
 
 
-async def process_incident_workflow(
-    incident_id: str,
-    project_id: Optional[str] = None,
-):
+def _run_workflow_in_thread(incident_id: str, project_id: Optional[str] = None) -> None:
     """
-    Background task to process incident through agent workflow.
+    Run the incident workflow in a dedicated thread so it does NOT block the
+    ingestion API's asyncio event loop.
 
-    Uses run_incident_workflow which properly resolves project_id from the
-    incident's app_name so that the correct project's integration configs
-    (LLM, Jira, GitHub, etc.) are used.
+    LLM calls inside the workflow nodes are synchronous HTTP requests that can
+    take 15-120 seconds each.  Awaiting them directly in a FastAPI BackgroundTask
+    keeps the coroutine resident in the main event loop and prevents new HTTP
+    requests from being served while the LLM is thinking.
+
+    Running the workflow synchronously in a thread-pool worker avoids this by
+    giving the blocking calls their own OS thread, leaving the event loop free.
 
     Args:
         incident_id: 4-character alphanumeric incident ID (e.g., A7CB)
+        project_id:  Optional project context; resolved from app_name if None.
     """
     try:
-        logger.info(f"Starting workflow for incident {incident_id}")
+        logger.info("[Workflow/thread] Starting workflow for incident %s", incident_id)
 
-        from agents.workflow import run_incident_workflow, _resolve_project_id_for_incident
+        from agents.workflow import run_workflow_for_incident, _resolve_project_id_for_incident
 
         db = next(get_db())
         repo = IncidentRepository(db)
         incident = repo.get_by_id(incident_id)
 
         if not incident:
-            logger.error(f"Incident {incident_id} not found")
+            logger.error("[Workflow/thread] Incident %s not found", incident_id)
             return
 
-        # Resolve the project this incident belongs to so the workflow can load
-        # the correct LLM / integration configs even when the app name doesn't
-        # directly match a project name.
-        project_id = project_id or getattr(incident, "project_id", None) or _resolve_project_id_for_incident(
-            None,
-            incident.app_name,
-            incident.environment,
-        )
-
-        if not project_id:
-            logger.warning(
-                "[Workflow] Could not resolve project for incident=%s app=%s env=%s. "
-                "Attempting to use any available project LLM config as fallback. "
-                "To fix permanently, ensure app names match a project name/repo or configure "
-                "app_names in project settings.",
-                incident_id,
+        # Resolve the project so the correct LLM / integration configs are used.
+        resolved_project_id = (
+            project_id
+            or getattr(incident, "project_id", None)
+            or _resolve_project_id_for_incident(
+                None,
                 incident.app_name,
                 incident.environment,
             )
-        else:
-            logger.info(
-                "[Workflow] Resolved project_id=%s for incident=%s app=%s",
-                project_id, incident_id, incident.app_name,
-            )
-
-        await run_incident_workflow(
-            incident_id=incident.incident_id,
-            app_name=incident.app_name or "",
-            environment=incident.environment or "",
-            error_title=incident.error_title or "",
-            error_description=incident.error_description or "",
-            stack_trace=incident.stack_trace or "",
-            raw_log=incident.raw_log or "",
-            fingerprint=incident.error_fingerprint or "",
-            severity=incident.severity or "HIGH",
-            is_duplicate=False,
-            metadata=incident.incident_metadata,
-            project_id=project_id,
         )
 
-        logger.info(f"Workflow completed for incident {incident_id}")
+        if not resolved_project_id:
+            logger.warning(
+                "[Workflow/thread] Could not resolve project for incident=%s app=%s env=%s.",
+                incident_id, incident.app_name, incident.environment,
+            )
+        else:
+            logger.info(
+                "[Workflow/thread] Resolved project_id=%s for incident=%s app=%s",
+                resolved_project_id, incident_id, incident.app_name,
+            )
 
-    except Exception as e:
-        logger.error(f"Workflow failed for incident {incident_id}: {str(e)}")
+        run_workflow_for_incident(incident_id, resolved_project_id)
+        logger.info("[Workflow/thread] Workflow completed for incident %s", incident_id)
+
+    except Exception as exc:
+        logger.error("[Workflow/thread] Workflow failed for incident %s: %s", incident_id, exc)
         try:
             db = next(get_db())
             repo = IncidentRepository(db)
-            repo.update_status(incident_id, IncidentStatus.FAILED)
+            repo.update(
+                incident_id,
+                status=IncidentStatus.FAILED.value,
+            )
             incident = repo.get_by_id(incident_id)
             if incident:
-                if not incident.processing_errors:
-                    incident.processing_errors = []
-                incident.processing_errors.append(f"Workflow error: {str(e)}")
-                db.commit()
-        except Exception as inner_e:
-            logger.error(f"Failed to update error status: {str(inner_e)}")
+                errs = list(incident.processing_errors or [])
+                errs.append(f"Workflow error: {exc}")
+                repo.update(incident_id, processing_errors=errs)
+        except Exception as inner_exc:
+            logger.error(
+                "[Workflow/thread] Failed to update error status for incident %s: %s",
+                incident_id, inner_exc,
+            )
 
 
+async def process_incident_workflow(
+    incident_id: str,
+    project_id: Optional[str] = None,
+) -> None:
+    """
+    Background task entry-point — dispatches the incident workflow either in
+    **sequential FIFO** order or **parallel** mode, depending on the project's
+    ``llm_processing_mode`` runtime setting.
+
+    Sequential mode  (``llm_processing_mode = "sequential"``)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Incidents are enqueued in a per-project asyncio.Queue and processed one at
+    a time in strict FIFO order.  Only one LLM workflow runs at a time per
+    project, ensuring deterministic, resource-efficient processing.  Useful
+    when the LLM provider has rate limits or when predictable ordering matters.
+
+    Parallel mode  (``llm_processing_mode = "parallel"``, default)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Each incident is dispatched immediately to a thread-pool executor — the
+    original behaviour.  Multiple incidents can be processed concurrently.
+
+    Args:
+        incident_id: 4-character alphanumeric incident ID (e.g., A7CB)
+        project_id:  Optional project context.
+    """
+    mode = _get_project_processing_mode(project_id)
+
+    if mode == "sequential":
+        logger.info(
+            "[Workflow] Sequential FIFO mode: queuing incident %s for project %s",
+            incident_id,
+            project_id,
+        )
+        await _start_or_enqueue_sequential(incident_id, project_id)
+    else:
+        # Parallel mode — original behaviour: dispatch immediately to the
+        # thread-pool executor so the event loop stays unblocked.
+        logger.info(
+            "[Workflow] Parallel mode: dispatching incident %s immediately for project %s",
+            incident_id,
+            project_id,
+        )
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _run_workflow_in_thread, incident_id, project_id)
 
 
 # Health check

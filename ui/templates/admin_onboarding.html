@@ -192,10 +192,14 @@
 
 {% block extra_js %}
 <script>
-function goStep(n) {
+function prismAlert(message) {
+  return window.prism.alert({ title: 'PrismAI', message: message });
+}
+
+async function goStep(n) {
   if (n === 2) {
     if (!document.getElementById('projectName').value.trim()) {
-      alert('Project name is required.');
+      await prismAlert('Project name is required.');
       return;
     }
   }
@@ -208,7 +212,7 @@ function goStep(n) {
         !document.getElementById('taEmail').value.trim() ||
         !document.getElementById('taPassword').value.trim()
       ) {
-        alert('Username, email and password are required for a new Team Admin.');
+        await prismAlert('Username, email and password are required for a new Team Admin.');
         return;
       }
     }
@@ -284,7 +288,7 @@ async function submitOnboarding() {
     const sel = document.getElementById('taSelectExisting');
     const selectedOption = sel.options[sel.selectedIndex];
     if (!sel.value) {
-      alert('Please select an existing Team Admin or choose "Create new Team Admin".');
+      await prismAlert('Please select an existing Team Admin or choose "Create new Team Admin".');
       btn.disabled = false;
       btn.textContent = '✓ Create Project';
       return;
@@ -305,12 +309,12 @@ async function submitOnboarding() {
     if (r.ok) {
       window.location.href = '/admin/dashboard?created=' + encodeURIComponent((d.project && d.project.name) || payload.name || 'project');
     } else {
-      alert(d.error || 'Error creating project');
+      await prismAlert(d.error || 'Error creating project');
       btn.disabled = false;
       btn.textContent = '✓ Create Project';
     }
   } catch (e) {
-    alert('Network error: ' + e.message);
+    await prismAlert('Network error: ' + e.message);
     btn.disabled = false;
     btn.textContent = '✓ Create Project';
   }

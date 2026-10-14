@@ -1,0 +1,97 @@
+{
+  "provenance": "Local Prism SQLite record and locally generated artifacts. External systems were not accessed during documentation generation.",
+  "incident": {
+    "incident_id": "NTTD6XI2",
+    "app_name": "order-processing-service",
+    "environment": "Production",
+    "severity": "CRITICAL",
+    "status": "PR_CREATED",
+    "rca_confidence": 0.875,
+    "approval_status": "approved",
+    "approved_at": "2026-10-14 10:18:22.050863",
+    "jira_ticket_key": "SCRUM-12",
+    "jira_ticket_url": "https://uavinashcsit2026.atlassian.net/browse/SCRUM-12",
+    "repo_full_name": "avinash-ai-langchain/order-processing-service",
+    "error_file_path": "src/main/mule/order-processing-flows.xml",
+    "error_line_number": 35,
+    "pr_number": 61,
+    "pr_url": "https://github.com/avinash-ai-langchain/order-processing-service/pull/61",
+    "commit_sha": "e18a891dd7c03b42454d927b6c59525ca1d56be6",
+    "commit_url": "https://github.com/avinash-ai-langchain/order-processing-service/commit/e18a891dd7c03b42454d927b6c59525ca1d56be6",
+    "pdf_path": "data\\pdfs\\incident_NTTD6XI2_20261014_153920.pdf",
+    "patch_path": "data\\patches\\incident_NTTD6XI2_20261014_101016.patch",
+    "created_at": "2026-10-14 10:03:03.871203",
+    "updated_at": "2026-10-14 10:19:28.944123"
+  },
+  "workflow_events": [
+    {
+      "step_name": "generate_rca",
+      "event_type": "started",
+      "attempt": 1,
+      "message": null,
+      "duration_seconds": null,
+      "created_at": "2026-10-14 10:03:13.581950"
+    },
+    {
+      "step_name": "generate_rca",
+      "event_type": "succeeded",
+      "attempt": 1,
+      "message": null,
+      "duration_seconds": 165.22,
+      "created_at": "2026-10-14 10:05:58.802079"
+    },
+    {
+      "step_name": "generate_fix",
+      "event_type": "started",
+      "attempt": 1,
+      "message": null,
+      "duration_seconds": null,
+      "created_at": "2026-10-14 10:05:58.839930"
+    },
+    {
+      "step_name": "generate_fix",
+      "event_type": "succeeded",
+      "attempt": 1,
+      "message": null,
+      "duration_seconds": 177.806,
+      "created_at": "2026-10-14 10:08:56.645423"
+    },
+    {
+      "step_name": "generate_pdf",
+      "event_type": "started",
+      "attempt": 1,
+      "message": null,
+      "duration_seconds": null,
+      "created_at": "2026-10-14 10:09:20.853525"
+    },
+    {
+      "step_name": "generate_pdf",
+      "event_type": "succeeded",
+      "attempt": 1,
+      "message": null,
+      "duration_seconds": 0.224,
+      "created_at": "2026-10-14 10:09:21.077593"
+    },
+    {
+      "step_name": "generate_patch_file",
+      "event_type": "started",
+      "attempt": 1,
+      "message": null,
+      "duration_seconds": null,
+      "created_at": "2026-10-14 10:10:16.174433"
+    },
+    {
+      "step_name": "generate_patch_file",
+      "event_type": "succeeded",
+      "attempt": 1,
+      "message": null,
+      "duration_seconds": 0.064,
+      "created_at": "2026-10-14 10:10:16.239214"
+    }
+  ],
+  "external_references_recorded_by_prism": {
+    "jira": "https://uavinashcsit2026.atlassian.net/browse/SCRUM-12",
+    "github_pull_request": "https://github.com/avinash-ai-langchain/order-processing-service/pull/61",
+    "github_commit": "https://github.com/avinash-ai-langchain/order-processing-service/commit/e18a891dd7c03b42454d927b6c59525ca1d56be6"
+  }
+}

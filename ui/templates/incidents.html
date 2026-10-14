@@ -19,74 +19,90 @@
 {% block topbar_title %}Incidents{% endblock %}
 
 {% block content %}
-<div style="display:flex;flex-direction:column;gap:16px;">
+<div class="incident-shell">
 
-  <!-- Project + integration toolbar -->
-  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap;padding:14px 18px;background:#fff;border:1px solid var(--gray-200);border-radius:14px;box-shadow:var(--shadow-sm);">
-    <div style="display:flex;align-items:flex-start;gap:18px;flex:1;min-width:0;flex-wrap:wrap;">
-      <div style="display:flex;flex-direction:column;gap:6px;min-width:280px;flex:1;">
-        <label for="projectSwitcher" style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--gray-500);">Active Project</label>
-        <select id="projectSwitcher" class="form-select" style="min-height:40px;border-color:#c4b5fd;font-weight:600;color:var(--gray-800);max-width:480px;">
-          {% for project in available_projects %}
-          <option value="{{ project.id }}" {% if selected_project and project.id == selected_project.id %}selected{% endif %}>{{ project.name }}</option>
-          {% endfor %}
-        </select>
-        {% if selected_project %}<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">{% if selected_project.repo_url %}<span style="font-size:.74rem;color:var(--gray-400);">{{ selected_project.repo_url }}</span>{% endif %}</div>{% endif %}
+  <!-- Overview: project switcher + integrations + live counts -->
+  <div class="card incident-overview">
+    <div class="incident-toolbar">
+      <div class="incident-toolbar__project">
+        <span class="incident-toolbar__label">Active Project</span>
+        <div class="incident-project-switcher">
+          <select id="projectSwitcher" class="form-select incident-project-switcher__select">
+            {% for project in available_projects %}
+            <option value="{{ project.id }}" {% if selected_project and project.id == selected_project.id %}selected{% endif %}>{{ project.name }}</option>
+            {% endfor %}
+          </select>
+          {% if selected_project %}
+          <div class="incident-project-switcher__context">
+            {% if selected_project.repo_url %}<span class="incident-project-switcher__repo">{{ selected_project.repo_url }}</span>{% endif %}
+          </div>
+          {% endif %}
+        </div>
       </div>
+
       {% if integration_summary %}
-      <div style="display:flex;flex-direction:column;gap:6px;min-width:240px;flex:1;">
-        <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--gray-500);">Integrations</div>
-        <div style="display:flex;flex-wrap:wrap;gap:8px;">
+      <div class="incident-toolbar__integrations">
+        <span class="incident-toolbar__label">Integrations</span>
+        <div class="integration-status-list">
           {% for intg in integration_summary %}
-          {% if intg.live %}<div style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:10px;border:1px solid #bbf7d0;background:#f0fdf4;"><span style="width:7px;height:7px;border-radius:50%;background:#16a34a;"></span><span style="font-size:.76rem;font-weight:700;color:#166534;">{{ intg.label }}</span>{% if intg.meta %}<span style="font-size:.68rem;color:#14532d;">{{ intg.meta }}</span>{% endif %}</div>
-          {% else %}<div style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:10px;border:1px solid #bfdbfe;background:#eff6ff;"><span style="width:7px;height:7px;border-radius:50%;background:#2563eb;"></span><span style="font-size:.76rem;font-weight:700;color:#1e40af;">{{ intg.label }}</span></div>{% endif %}
+          <div class="integration-status-card {% if intg.live %}integration-status-card--live{% else %}integration-status-card--configured{% endif %}">
+            <div class="integration-status-card__main">
+              <span class="integration-status-card__name">{{ intg.label }}</span>
+              <span class="status-dot {% if intg.live %}status-dot--online{% else %}status-dot-gray{% endif %}" aria-hidden="true"></span>
+            </div>
+            {% if intg.meta %}<span class="integration-status-card__hint">{{ intg.meta }}</span>{% endif %}
+          </div>
           {% endfor %}
         </div>
       </div>
       {% endif %}
-    </div>
-    <div style="display:flex;gap:10px;flex-shrink:0;">
-      <div style="min-width:82px;padding:10px 14px;border:1px solid var(--gray-200);border-radius:12px;background:var(--gray-50);text-align:center;">
-        <div style="font-size:1.3rem;font-weight:800;color:var(--gray-900);line-height:1;">{{ incidents|length }}</div>
-        <div style="font-size:.65rem;color:var(--gray-500);text-transform:uppercase;letter-spacing:.05em;margin-top:4px;">Visible</div>
-      </div>
-      <div style="min-width:82px;padding:10px 14px;border:1px solid var(--gray-200);border-radius:12px;background:var(--gray-50);text-align:center;">
-        <div style="font-size:1.3rem;font-weight:800;color:var(--gray-900);line-height:1;">{{ total }}</div>
-        <div style="font-size:.65rem;color:var(--gray-500);text-transform:uppercase;letter-spacing:.05em;margin-top:4px;">Total</div>
+
+      <div class="incident-overview__meta" style="justify-content:flex-end;">
+        <div class="incident-overview__metric">
+          <span class="incident-overview__metric-value">{{ incidents|length }}</span>
+          <span class="incident-overview__metric-label">Visible</span>
+        </div>
+        <div class="incident-overview__metric">
+          <span class="incident-overview__metric-value">{{ total }}</span>
+          <span class="incident-overview__metric-label">Total</span>
+        </div>
       </div>
     </div>
   </div>
 
   <!-- Filters + search -->
-  <form method="get" action="/incidents" id="filterForm"
-    style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;background:#fff;border:1px solid var(--gray-200);border-radius:12px;box-shadow:var(--shadow-sm);">
-    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-      <span style="font-size:.72rem;font-weight:700;color:var(--gray-500);">Severity</span>
+  <form method="get" action="/incidents" id="filterForm" class="filter-bar incident-filter-bar">
+    <div class="filter-group filter-checks">
+      <span class="filter-label">Severity</span>
       {% for sev in all_severities %}
-      <label style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border:1px solid var(--gray-200);border-radius:9999px;background:#fff;font-size:.73rem;font-weight:600;color:var(--gray-700);cursor:pointer;">
-        <input type="checkbox" name="severity" value="{{ sev }}" {% if sev in filter_severity %}checked{% endif %} style="accent-color:var(--prism-600);">{{ sev }}
+      <label class="check-chip">
+        <input type="checkbox" name="severity" value="{{ sev }}" {% if sev in filter_severity %}checked{% endif %}>{{ sev }}
       </label>
       {% endfor %}
     </div>
-    <div style="width:1px;height:22px;background:var(--gray-200);"></div>
-    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-      <span style="font-size:.72rem;font-weight:700;color:var(--gray-500);">Status</span>
+    <div class="divider" style="width:1px;height:22px;margin:0;"></div>
+    <div class="filter-group filter-checks">
+      <span class="filter-label">Status</span>
       {% for st in all_statuses %}
-      <label style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border:1px solid var(--gray-200);border-radius:9999px;background:#fff;font-size:.73rem;font-weight:600;color:var(--gray-700);cursor:pointer;">
-        <input type="checkbox" name="status" value="{{ st }}" {% if st in filter_status %}checked{% endif %} style="accent-color:var(--prism-600);">{{ st.replace('_', ' ') }}
+      <label class="check-chip">
+        <input type="checkbox" name="status" value="{{ st }}" {% if st in filter_status %}checked{% endif %}>{{ st.replace('_', ' ') }}
       </label>
       {% endfor %}
     </div>
-    <div style="width:1px;height:22px;background:var(--gray-200);"></div>
+    <div class="divider" style="width:1px;height:22px;margin:0;"></div>
     <input class="input" type="text" name="app_name" placeholder="App name…" value="{{ filter_app }}" style="min-width:110px;max-width:150px;">
-    <input class="input" type="text" name="search" id="searchInput" placeholder="🔍 Search title, RCA, stack…" value="{{ filter_search or '' }}" style="min-width:180px;flex:1;max-width:280px;" title="Search error title, description, RCA text, stack trace">
-    <button class="btn btn-primary btn-sm" type="submit">Apply</button>
-    <a class="btn btn-ghost btn-sm" href="/incidents">Clear</a>
-    <a id="exportCsvBtn" href="/api/incidents/export.csv" class="btn btn-ghost btn-sm" style="white-space:nowrap;" title="Download as CSV">⬇ Export CSV</a>
+    <div class="filter-group filter-group--search">
+      <input class="input" type="text" name="search" id="searchInput" placeholder="🔍 Search title, RCA, stack…" value="{{ filter_search or '' }}" title="Search error title, description, RCA text, stack trace">
+    </div>
+    <div class="filter-actions">
+      <button class="btn btn-primary btn-sm" type="submit">Apply</button>
+      <a class="btn btn-ghost btn-sm" href="/incidents">Clear</a>
+      <a id="exportCsvBtn" href="/api/incidents/export.csv" class="btn btn-ghost btn-sm" style="white-space:nowrap;" title="Download as CSV">⬇ Export CSV</a>
+    </div>
   </form>
 
   <!-- Bulk Actions Bar -->
-  <div id="bulkActionBar" style="display:none;align-items:center;gap:12px;padding:10px 16px;background:#faf5ff;border:1px solid #d8b4fe;border-radius:12px;">
+  <div id="bulkActionBar" class="incident-bulk-actions" style="display:none;align-items:center;gap:12px;padding:10px 16px;background:#faf5ff;border:1px solid #d8b4fe;border-radius:12px;">
     <span id="bulkCountLabel" style="font-size:.82rem;font-weight:700;color:var(--prism-700);">0 selected</span>
     <div style="flex:1;"></div>
     <input type="text" id="bulkNotesInput" placeholder="Optional review notes…" style="min-width:180px;padding:6px 10px;border:1px solid var(--gray-300);border-radius:8px;font-size:.82rem;flex:1;max-width:300px;">
@@ -96,7 +112,7 @@
   </div>
 
   {% if incidents %}
-  <div style="display:flex;align-items:center;gap:8px;padding:2px 2px;">
+  <div class="incident-list-selection" style="display:flex;align-items:center;gap:8px;padding:2px 2px;">
     <label style="display:inline-flex;align-items:center;gap:6px;font-size:.77rem;font-weight:600;color:var(--gray-600);cursor:pointer;">
       <input type="checkbox" id="selectAllCb" onchange="toggleSelectAll(this.checked)" style="accent-color:var(--prism-600);width:14px;height:14px;">
       Select all visible
@@ -104,10 +120,10 @@
     <span style="font-size:.71rem;color:var(--gray-400);">— enables bulk approve / reject</span>
   </div>
 
-  <div style="display:flex;flex-direction:column;gap:10px;">
+  <div class="incident-list">
     {% for inc in incidents %}
     <div style="display:flex;align-items:flex-start;gap:10px;">
-      <div style="padding-top:20px;flex-shrink:0;">
+      <div class="incident-cb-wrap">
         <input type="checkbox" class="incident-cb" data-id="{{ inc.incident_id }}" onchange="onIncidentCbChange()" style="accent-color:var(--prism-600);width:14px;height:14px;cursor:pointer;">
       </div>
       <a href="/incidents/{{ inc.incident_id }}"
@@ -116,9 +132,7 @@
         data-approval-status="{{ inc.approval_status or '' }}"
         data-current-node="{{ inc.current_workflow_node or '' }}"
         data-workflow-progress="{{ inc.workflow_progress_pct or '' }}"
-        style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 20px;border:1px solid var(--gray-200);border-radius:14px;background:#fff;box-shadow:var(--shadow-sm);text-decoration:none;color:inherit;transition:border-color .15s,box-shadow .15s;flex:1;"
-        onmouseover="this.style.borderColor='#d8b4fe';this.style.boxShadow='var(--shadow-md)';"
-        onmouseout="this.style.borderColor='var(--gray-200)';this.style.boxShadow='var(--shadow-sm)';">
+        class="incident-row-card">
         <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:8px;">
           <div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">
             <span class="badge {{ inc.severity | severity_badge }}">{{ inc.severity or '—' }}</span>
@@ -126,10 +140,10 @@
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:.73rem;color:var(--gray-500);">
             <span style="font-family:var(--font-mono);font-weight:700;color:var(--gray-700);">{{ inc.incident_id }}</span>
-            {% if inc.app_name %}<span style="padding:2px 7px;border-radius:9999px;background:var(--gray-50);border:1px solid var(--gray-200);">{{ inc.app_name }}</span>{% endif %}
-            <span style="padding:2px 7px;border-radius:9999px;background:var(--gray-50);border:1px solid var(--gray-200);">{{ inc.created_at | fmt_dt }}</span>
-            {% if inc.environment %}<span style="padding:2px 7px;border-radius:9999px;background:var(--gray-50);border:1px solid var(--gray-200);">{{ inc.environment }}</span>{% endif %}
-            {% if inc.rca_confidence is not none %}<span style="padding:2px 7px;border-radius:9999px;background:#f0fdf4;border:1px solid #bbf7d0;color:#15803d;font-weight:700;">{{ "%.0f"|format(inc.rca_confidence * 100) }}% conf.</span>{% endif %}
+            {% if inc.app_name %}<span class="incident-row-chip">{{ inc.app_name }}</span>{% endif %}
+            <span class="incident-row-chip">{{ inc.created_at | fmt_dt }}</span>
+            {% if inc.environment %}<span class="incident-row-chip">{{ inc.environment }}</span>{% endif %}
+            {% if inc.rca_confidence is not none %}<span class="incident-row-chip incident-row-chip--conf">{{ "%.0f"|format(inc.rca_confidence * 100) }}% conf.</span>{% endif %}
           </div>
         </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0;min-width:130px;">
@@ -177,8 +191,8 @@
               </span>
             </span>
             {% endif %}
-            {% if inc.pr_url %}<span style="padding:3px 8px;border-radius:9999px;background:#f5f3ff;border:1px solid #ddd6fe;color:var(--prism-700);font-size:.68rem;font-weight:700;">PR</span>{% endif %}
-            {% if inc.jira_ticket_url %}<span style="padding:3px 8px;border-radius:9999px;background:#f5f3ff;border:1px solid #ddd6fe;color:var(--prism-700);font-size:.68rem;font-weight:700;">Jira</span>{% endif %}
+            {% if inc.pr_url %}<span class="incident-row-pill">PR</span>{% endif %}
+            {% if inc.jira_ticket_url %}<span class="incident-row-pill">Jira</span>{% endif %}
             </div>
           </div>
       </a>
@@ -385,13 +399,16 @@ function clearBulkSelection() {
 
 async function bulkAction(action) {
   var ids = getSelectedIds();
-  if (!ids.length) { alert('No incidents selected.'); return; }
+  if (!ids.length) { await window.prism.alert('No incidents selected.'); return; }
   var notes = document.getElementById('bulkNotesInput').value.trim();
   var label = action === 'approve' ? 'Approve' : 'Reject';
-  if (!confirm(label + ' ' + ids.length + ' incident(s)?')) return;
-
-  var btn = document.querySelector('#bulkActionBar button');
-  var originalText = btn ? btn.textContent : '';
+  var confirmed = await window.prism.confirm({
+    title: label + ' incidents?',
+    message: label + ' ' + ids.length + ' incident(s)?',
+    confirmLabel: label,
+    danger: action === 'reject'
+  });
+  if (!confirmed) return;
 
   try {
     const r = await fetch('/api/incidents/bulk-approve', {
@@ -401,7 +418,7 @@ async function bulkAction(action) {
     });
     const d = await r.json();
     if (r.ok) {
-      alert(label + 'd ' + d.succeeded + '/' + d.total + ' incidents.' + (d.failed > 0 ? ' ' + d.failed + ' failed.' : ''));
+      window.prism.toast(label + 'd ' + d.succeeded + '/' + d.total + ' incidents.' + (d.failed > 0 ? ' ' + d.failed + ' failed.' : ''), d.failed > 0 ? 'warning' : 'success');
       // Kick off post-approval workflows for newly approved incidents
       if (action === 'approve') {
         for (const res of (d.results || [])) {
@@ -417,10 +434,10 @@ async function bulkAction(action) {
       clearBulkSelection();
       setTimeout(function () { window.location.reload(); }, 800);
     } else {
-      alert(d.error || 'Bulk action failed');
+      await window.prism.alert(d.error || 'Bulk action failed');
     }
   } catch (e) {
-    alert('Network error: ' + e.message);
+    await window.prism.alert('Network error: ' + e.message);
   }
 }
 </script>
@@ -430,6 +447,142 @@ async function bulkAction(action) {
   0% { transform: scale(.95); box-shadow: 0 0 0 0 rgba(37,99,235,.35); }
   70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(37,99,235,0); }
   100% { transform: scale(.95); box-shadow: 0 0 0 0 rgba(37,99,235,0); }
+}
+
+/* ── Dense desktop layout: prioritize the incident queue ──────────────── */
+@media (min-width: 1101px) {
+  .incident-shell { gap: 10px; }
+
+  .incident-overview {
+    padding: 10px 14px;
+    background: #fff;
+  }
+
+  .incident-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 0;
+  }
+
+  .incident-toolbar__project {
+    flex: 0 1 340px;
+    min-width: 240px;
+    gap: 4px;
+  }
+
+  .incident-toolbar__integrations {
+    flex: 1;
+    min-width: 0;
+    gap: 4px;
+  }
+
+  .incident-toolbar__label {
+    font-size: .66rem;
+    line-height: 1;
+  }
+
+  .incident-project-switcher,
+  .incident-project-switcher__context {
+    display: contents;
+  }
+
+  .incident-project-switcher__select {
+    min-height: 32px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    font-size: .8rem;
+  }
+
+  .incident-project-switcher__repo {
+    display: none;
+  }
+
+  .integration-status-list {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+  }
+
+  .integration-status-card {
+    display: inline-flex;
+    flex: 0 1 auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 6px 9px;
+    border-radius: 9999px;
+    box-shadow: none;
+  }
+
+  .integration-status-card__main { gap: 6px; }
+  .integration-status-card__name { font-size: .73rem; white-space: nowrap; }
+  .integration-status-card__hint { display: none; }
+
+  .incident-overview__meta {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    gap: 6px !important;
+  }
+
+  .incident-overview__metric {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    min-width: 0;
+    padding: 6px 8px;
+    border-radius: 8px;
+    box-shadow: none;
+  }
+
+  .incident-overview__metric-value { font-size: .95rem; }
+  .incident-overview__metric-label {
+    margin-top: 0;
+    font-size: .62rem;
+  }
+
+  .incident-filter-bar {
+    gap: 8px;
+    margin-bottom: 0;
+    padding: 7px 10px;
+  }
+
+  .filter-checks { gap: 5px; }
+  .filter-label { font-size: .7rem; }
+  .check-chip { padding: 4px 7px; font-size: .7rem; }
+  .filter-group--search { min-width: 180px; }
+  .incident-filter-bar .input { padding: 5px 8px; font-size: .78rem; }
+  .filter-actions { gap: 5px; }
+
+  .incident-list-selection { min-height: 24px; }
+  .incident-list { display: flex; flex-direction: column; gap: 7px; }
+
+  .incident-cb-wrap { padding-top: 15px; }
+
+  .incident-row-card {
+    gap: 14px;
+    padding: 11px 14px;
+    border-radius: 12px;
+  }
+
+  .incident-row-card > div:first-child { gap: 5px !important; }
+  .incident-row-card > div:last-child { gap: 5px !important; }
+}
+
+.incident-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.incident-list-selection {
+  min-height: 26px;
+}
+
+.incident-bulk-actions {
+  margin: 0;
 }
 
 /* ── Mobile-responsive incident cards ──────────────────────────────────── */

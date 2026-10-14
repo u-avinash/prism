@@ -24,6 +24,41 @@ from storage.models import Severity
 logger = logging.getLogger(__name__)
 
 
+def _get_recent_error_count(
+    app_name: str,
+    project_id: str = None,
+    window_minutes: int = 10,
+) -> int:
+    """
+    Query the database for the number of incidents raised for this app within
+    the given time window, to support error-burst detection.
+
+    This is a best-effort lookup — any DB failure degrades gracefully to 0
+    (no burst detected) rather than blocking the workflow.
+    """
+    if not app_name:
+        return 0
+
+    try:
+        from storage.database import get_session
+        from storage.incident_repository import IncidentRepository
+
+        with get_session() as session:
+            repo = IncidentRepository(session)
+            recent = repo.get_recent_by_app(
+                app_name=app_name,
+                minutes=window_minutes,
+                project_id=project_id,
+            )
+            return len(recent)
+    except Exception as exc:
+        logger.warning(
+            "[Severity Assessment] Failed to query recent error count for app '%s': %s",
+            app_name, exc,
+        )
+        return 0
+
+
 def assess_severity_node(state: AgentState) -> AgentState:
     """
     Assess error severity and determine if auto-fix workflow should proceed.
@@ -79,12 +114,34 @@ def assess_severity_node(state: AgentState) -> AgentState:
             source_technology=source_technology,
         )
     
+    # Query recent error count for burst detection (real DB lookup, not hardcoded)
+    recent_error_count = _get_recent_error_count(
+        app_name=state.get('app_name'),
+        project_id=state.get('project_id'),
+        window_minutes=analyzer.burst_window,
+    )
+
     # Check if auto-fix should be triggered
     should_fix, reason = analyzer.should_auto_fix(
         severity=severity,
-        recent_error_count=0,  # TODO: Query from database
+        recent_error_count=recent_error_count,
         is_duplicate=state['is_duplicate']
     )
+
+    # Escalate severity on error burst (HIGH -> CRITICAL) even if LLM/heuristic
+    # classified it lower, so documented ERROR_BURST_THRESHOLD behavior is honored.
+    if recent_error_count >= analyzer.burst_threshold and severity == Severity.HIGH:
+        logger.info(
+            "[Severity Assessment] Escalating HIGH -> CRITICAL due to error burst "
+            "(%s occurrences in %s minutes, threshold=%s)",
+            recent_error_count, analyzer.burst_window, analyzer.burst_threshold,
+        )
+        severity = Severity.CRITICAL
+        reason = (
+            f"Escalated to CRITICAL: error burst detected "
+            f"({recent_error_count} occurrences in {analyzer.burst_window} min)"
+        )
+        should_fix = True
     
     # Update state
     state['severity'] = severity.value

@@ -126,6 +126,45 @@ class GitHubClient:
 
         return repo_value
 
+    def get_accessible_repo_full_name(self, repo_value: Optional[str]) -> Optional[str]:
+        """
+        Verify that a repository identifier is both valid and accessible.
+
+        GitHub intentionally returns 404 for private repositories that a token
+        cannot read. Returning ``None`` lets callers fall back to an application
+        mapping or produce a clear configuration message instead of attempting
+        a file request against an unverified owner/repository value.
+        """
+        repo_full_name = self._clean_repo_full_name(repo_value)
+        if not self._is_full_repo_name(repo_full_name):
+            return None
+
+        try:
+            repo = self.client.get_repo(repo_full_name)
+            resolved_name = self._clean_repo_full_name(repo.full_name)
+            logger.info("Verified GitHub repository access: %s", resolved_name)
+            return resolved_name
+        except GithubException as exc:
+            if exc.status in (403, 404):
+                logger.warning(
+                    "Cannot access GitHub repository '%s' (HTTP %s). "
+                    "Confirm the owner/repository mapping and that the configured "
+                    "token has repository Contents: Read access.",
+                    repo_full_name,
+                    exc.status,
+                )
+            else:
+                logger.warning(
+                    "GitHub API error validating repository '%s': HTTP %s - %s",
+                    repo_full_name,
+                    exc.status,
+                    exc.data,
+                )
+        except Exception as exc:
+            logger.warning("Could not validate GitHub repository '%s': %s", repo_full_name, exc)
+
+        return None
+
     def _derive_repo_from_org_only_mapping(self, repo_value: str, app_name: str) -> str:
         """
         Convert an org-only mapping into a likely owner/repo candidate using app_name.
@@ -212,7 +251,31 @@ class GitHubClient:
             except Exception as exc:
                 logger.warning("GitHub organization search failed for '%s': %s", self.org, exc)
 
-        # ── 4. No repository found ────────────────────────────────────────────
+        # ── 4. Direct repo access — bypasses the org membership API ──────────
+        # Fine-Grained PATs and classic tokens with only the `repo` scope cannot
+        # call get_organization() or list org repos, so the whole step-3 block
+        # above fails with a 403/404.  A direct get_repo("org/name") call works
+        # with any token that has read access to the specific repository.
+        if self.org:
+            candidate = f"{self.org}/{app_name_norm}"
+            try:
+                repo = self.client.get_repo(candidate)
+                logger.info(
+                    "Repo resolved via direct access (repo-scoped token): %s",
+                    repo.full_name,
+                )
+                return self._clean_repo_full_name(repo.full_name)
+            except GithubException as exc:
+                if exc.status not in (403, 404):
+                    logger.warning(
+                        "Direct repo access for '%s' raised unexpected error: %s",
+                        candidate,
+                        exc,
+                    )
+            except Exception as exc:
+                logger.warning("Direct repo access for '%s' failed: %s", candidate, exc)
+
+        # ── 5. No repository found ────────────────────────────────────────────
         raise ValueError(
             f"Cannot resolve an accessible GitHub repository for application '{app_name_norm}' "
             f"in organization '{self.org or 'not configured'}'. "

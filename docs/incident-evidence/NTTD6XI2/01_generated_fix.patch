@@ -1,0 +1,20 @@
+--- src/main/mule/order-processing-flows.xml
++++ src/main/mule/order-processing-flows.xml
+@@ -39,14 +39,14 @@
+ 
+         <!-- CRITICAL ERROR #1: Missing required date field causing coercion failure -->
+         <try doc:name="Validation Try">
+-            <ee:transform doc:name="Parse Order Date (contains validation bug)">
++            <ee:transform doc:name="Parse Order Date (fixed: safe null handling)">
+                 <ee:message>
+                     <ee:set-payload><![CDATA[%dw 2.0
+ output application/json
+ ---
+ payload ++ {
+-  // Bug: orderDate field doesn't exist in input, causing Date coercion failure
+-  parsedOrderDate: payload.orderDate as Date
++  // Fix: Safely handle missing or null orderDate with explicit format and default
++  parsedOrderDate: if (payload.orderDate?) payload.orderDate as Date {format: "yyyy-MM-dd"} else now()
+ }]]></ee:set-payload>
+                 </ee:message>
+             </ee:transform>

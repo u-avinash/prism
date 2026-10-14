@@ -281,6 +281,48 @@
           </div>
         </div>
       </div>
+
+      <!-- ── LLM Processing Mode ───────────────────────────────────────── -->
+      <div class="card" style="margin-top:1.5rem;">
+        <div class="card-header admin-card-header">
+          <div>
+            <h2 class="card-title">LLM Processing Mode</h2>
+            <p class="card-subtitle">Choose how incidents are dispatched to the LLM for this project.</p>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="form-row" style="align-items:flex-start;">
+            <div class="form-group" style="flex:1;">
+              <label class="form-label" for="llmProcessingMode">Processing Mode</label>
+              <select class="form-input form-select" id="llmProcessingMode">
+                {% set current_mode = integration_config.get('runtime', {}).get('llm_processing_mode', 'parallel') %}
+                <option value="parallel" {% if current_mode != 'sequential' %}selected{% endif %}>
+                  ⚡ Parallel — process multiple incidents concurrently (default)
+                </option>
+                <option value="sequential" {% if current_mode == 'sequential' %}selected{% endif %}>
+                  🔢 Sequential FIFO — finish one incident before starting the next
+                </option>
+              </select>
+              <div class="form-hint">
+                <strong>Parallel</strong> dispatches each new incident to the LLM immediately — higher throughput, suited for most teams.<br>
+                <strong>Sequential FIFO</strong> queues incidents per-project and processes them one at a time in arrival order — ideal when your LLM provider has strict rate limits or when predictable, ordered processing matters.
+              </div>
+            </div>
+          </div>
+
+          <div class="integration-verification-note" id="llmProcessingModeState">
+            {% if current_mode == 'sequential' %}
+            Status: Sequential FIFO mode is active for this project
+            {% else %}
+            Status: Parallel mode is active (default)
+            {% endif %}
+          </div>
+
+          <div class="admin-form-actions" style="justify-content:flex-end;">
+            <button class="btn btn-primary" onclick="saveLlmProcessingMode()">💾 Save Processing Mode</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div id="tab-jira" class="tab-panel" style="display:none;">
@@ -483,14 +525,16 @@ function toggleMemberMode() {
 var llmModelCatalog = {
   // ── OpenAI ────────────────────────────────────────────────────────────
   openai: [
-    'gpt-5',
-    'gpt-5-mini',
-    'gpt-5-nano',
+    'gpt-4o',
+    'gpt-4o-mini',
     'gpt-4.1',
     'gpt-4.1-mini',
     'gpt-4.1-nano',
-    'gpt-4o',
-    'gpt-4o-mini',
+    'gpt-5',
+    'gpt-5-mini',
+    'o1',
+    'o1-mini',
+    'o1-pro',
     'o3',
     'o3-mini',
     'o4-mini'
@@ -501,8 +545,9 @@ var llmModelCatalog = {
     'gpt-4o-mini',
     'gpt-4.1',
     'gpt-4.1-mini',
-    'gpt-4-turbo',
-    'gpt-4',
+    'gpt-5',
+    'o1',
+    'o1-mini',
     'o3',
     'o3-mini',
     'o4-mini'
@@ -515,8 +560,7 @@ var llmModelCatalog = {
     'claude-sonnet-4-0',
     'claude-3-7-sonnet-20250219',
     'claude-3-5-sonnet-20241022',
-    'claude-3-5-haiku-20241022',
-    'claude-3-haiku-20240307'
+    'claude-3-5-haiku-20241022'
   ],
   // ── Google Gemini ────────────────────────────────────────────────────
   google_gemini: [
@@ -525,14 +569,9 @@ var llmModelCatalog = {
     'gemini-2.5-flash-lite',
     'gemini-2.0-flash',
     'gemini-2.0-flash-lite',
-    'gemini-1.5-pro',
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-8b',
     'gemma-3-27b-it',
     'gemma-3-12b-it',
-    'gemma-3-4b-it',
-    'gemma-2-27b-it',
-    'gemma-2-9b-it'
+    'gemma-3-4b-it'
   ],
   // ── Groq ─────────────────────────────────────────────────────────────
   groq: [
@@ -546,8 +585,7 @@ var llmModelCatalog = {
     'qwen/qwen-2.5-coder-32b-instruct',
     'compound-beta',
     'compound-beta-mini',
-    'openai/gpt-oss-120b',
-    'openai/gpt-oss-20b'
+    'openai/gpt-oss-120b'
   ],
   // ── Mistral ──────────────────────────────────────────────────────────
   mistral: [
@@ -560,11 +598,7 @@ var llmModelCatalog = {
     'devstral-medium-latest',
     'ministral-8b-latest',
     'ministral-3b-latest',
-    'codestral-latest',
-    'open-mistral-nemo',
-    'open-mixtral-8x22b',
-    'open-mixtral-8x7b',
-    'open-mistral-7b'
+    'codestral-latest'
   ],
   // ── Cohere ───────────────────────────────────────────────────────────
   cohere: [
@@ -574,32 +608,43 @@ var llmModelCatalog = {
     'command-r-08-2024',
     'command-r',
     'command-r7b-12-2024',
-    'command-light',
     'c4ai-aya-expanse-32b',
     'c4ai-aya-expanse-8b'
   ],
   // ── NVIDIA NIM ───────────────────────────────────────────────────────
   nvidia: [
+    // NVIDIA Nemotron (latest flagship)
+    'nvidia/nemotron-3-ultra-550b-a55b',
     'nvidia/llama-3.1-nemotron-ultra-253b-v1',
     'nvidia/llama-3.3-nemotron-super-49b-v1',
     'nvidia/llama-3.1-nemotron-70b-instruct',
+    'nvidia/nemotron-4-340b-instruct',
+    // Meta Llama 4
+    'meta/llama-4-maverick-17b-128e-instruct',
+    'meta/llama-4-scout-17b-16e-instruct',
+    // Meta Llama 3.x
     'meta/llama-3.3-70b-instruct',
     'meta/llama-3.1-405b-instruct',
     'meta/llama-3.1-70b-instruct',
     'meta/llama-3.1-8b-instruct',
+    // DeepSeek
     'deepseek-ai/deepseek-r1-0528',
     'deepseek-ai/deepseek-r1',
     'deepseek-ai/deepseek-v3-0324',
-    'z-ai/glm-5.2',
+    // Qwen
     'qwen/qwq-32b',
     'qwen/qwen2.5-72b-instruct',
+    'qwen/qwen3-235b-a22b',
+    // Microsoft
     'microsoft/phi-4-reasoning-plus',
     'microsoft/phi-4',
+    // Mistral
     'mistralai/mistral-large-2-instruct',
-    'mistralai/mixtral-8x22b-instruct-v0.1',
+    'mistralai/mistral-nemo-12b-instruct',
+    // Google
     'google/gemma-3-27b-it',
     'google/gemma-3-12b-it',
-    'nv-mistralai/mistral-nemo-12b-instruct',
+    // IBM Granite
     'ibm/granite-3.3-8b-instruct',
     'ibm/granite-3.3-2b-instruct'
   ],
@@ -610,9 +655,7 @@ var llmModelCatalog = {
     'grok-3-mini',
     'grok-3-mini-fast',
     'grok-2-1212',
-    'grok-2-vision-1212',
-    'grok-beta',
-    'grok-vision-beta'
+    'grok-2-vision-1212'
   ],
   // ── DeepSeek ─────────────────────────────────────────────────────────
   deepseek: [
@@ -620,9 +663,7 @@ var llmModelCatalog = {
     'deepseek-r1',
     'deepseek-v3-0324',
     'deepseek-v3',
-    'deepseek-reasoner',
-    'deepseek-chat',
-    'deepseek-coder'
+    'deepseek-reasoner'
   ],
   // ── Perplexity ───────────────────────────────────────────────────────
   perplexity: [
@@ -631,8 +672,7 @@ var llmModelCatalog = {
     'sonar-reasoning-pro',
     'sonar-reasoning',
     'sonar',
-    'r1-1776',
-    'sonar-turbo'
+    'r1-1776'
   ],
   // ── Together AI ──────────────────────────────────────────────────────
   together_ai: [
@@ -647,21 +687,26 @@ var llmModelCatalog = {
     'Qwen/Qwen2.5-72B-Instruct-Turbo',
     'Qwen/Qwen2.5-7B-Instruct-Turbo',
     'mistralai/Mixtral-8x22B-Instruct-v0.1',
-    'mistralai/Mixtral-8x7B-Instruct-v0.1',
     'mistralai/Mistral-7B-Instruct-v0.3',
-    'google/gemma-2-27b-it',
-    'microsoft/WizardLM-2-8x22B',
-    'NovaSky-AI/Sky-T1-32B-Preview'
+    'google/gemma-3-27b-it',
+    'microsoft/WizardLM-2-8x22B'
   ],
   // ── OpenRouter ───────────────────────────────────────────────────────
   openrouter: [
-    'openai/gpt-5',
+    'openai/gpt-4o',
     'openai/gpt-4.1',
-    'anthropic/claude-sonnet-4',
+    'openai/gpt-5',
+    'anthropic/claude-sonnet-4-5',
+    'anthropic/claude-opus-4-5',
     'google/gemini-2.5-pro',
+    'google/gemini-2.5-flash',
     'deepseek/deepseek-r1',
+    'deepseek/deepseek-v3',
+    'meta-llama/llama-3.3-70b-instruct',
     'meta-llama/llama-4-maverick',
-    'qwen/qwen3-235b-a22b'
+    'qwen/qwen3-235b-a22b',
+    'mistralai/mistral-large',
+    'x-ai/grok-3'
   ],
   // ── Cerebras ─────────────────────────────────────────────────────────
   cerebras: [
@@ -1231,6 +1276,52 @@ async function removeMember(userId, username, projectId) {
   } else {
     const d = await r.json();
     alert(d.error || 'Error removing team member');
+  }
+}
+
+async function saveLlmProcessingMode() {
+  var projectId = getSelectedProjectId();
+  if (!projectId) {
+    alert('Please select a project first.');
+    return;
+  }
+
+  var mode = document.getElementById('llmProcessingMode').value;
+  if (!mode || !['sequential', 'parallel'].includes(mode)) {
+    alert('Please choose a valid processing mode.');
+    return;
+  }
+
+  var statusEl = document.getElementById('llmProcessingModeState');
+  statusEl.textContent = 'Status: Saving...';
+  statusEl.classList.remove('table-primary');
+
+  try {
+    var r = await fetch('/api/team-admin/runtime-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project_id: projectId,
+        llm_processing_mode: mode
+      })
+    });
+    var d = await r.json();
+
+    if (!r.ok || !d.success) {
+      throw new Error(d.error || 'Failed to save processing mode');
+    }
+
+    var modeLabel = mode === 'sequential'
+      ? 'Sequential FIFO mode is active for this project'
+      : 'Parallel mode is active (default)';
+
+    statusEl.textContent = 'Status: Saved — ' + modeLabel;
+    statusEl.classList.add('table-primary');
+    alert('LLM processing mode set to "' + mode + '" for this project.');
+  } catch (e) {
+    statusEl.textContent = 'Status: Error — ' + e.message;
+    statusEl.classList.remove('table-primary');
+    alert('Error saving processing mode: ' + e.message);
   }
 }
 

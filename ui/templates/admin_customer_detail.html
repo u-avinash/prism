@@ -544,7 +544,7 @@ function hideAddEnvModal() { document.getElementById('addEnvModal').style.displa
 
 async function addEnvironment() {
   const name = document.getElementById('env-name').value.trim();
-  if (!name) { alert('Environment name is required'); return; }
+  if (!name) { window.prism.toast('Environment name is required', 'error'); return; }
   const payload = {
     name, type: document.getElementById('env-type').value,
     endpoint: document.getElementById('env-endpoint').value.trim(),
@@ -554,17 +554,18 @@ async function addEnvironment() {
     const r = await fetch(`/admin/customers/${CUST_ID}/environments`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
     const d = await r.json();
     if (r.ok) { window.location.reload(); }
-    else { alert(d.detail || 'Error adding environment'); }
-  } catch(e) { alert('Network error'); }
+    else { window.prism.toast(d.detail || 'Error adding environment', 'error'); }
+  } catch(e) { window.prism.toast('Network error', 'error'); }
 }
 
 async function removeEnv(envId) {
-  if (!confirm('Remove this environment?')) return;
+  const confirmed = await window.prism.confirm({ title: 'Remove environment?', message: 'This environment will be permanently removed from the customer account.', confirmLabel: 'Remove', danger: true });
+  if (!confirmed) return;
   try {
     const r = await fetch(`/admin/customers/${CUST_ID}/environments/${envId}`, { method:'DELETE' });
-    if (r.ok) { document.getElementById('env-row-' + envId)?.remove(); }
-    else { alert('Error removing environment'); }
-  } catch(e) { alert('Network error'); }
+    if (r.ok) { document.getElementById('env-row-' + envId)?.remove(); window.prism.toast('Environment removed', 'success'); }
+    else { window.prism.toast('Error removing environment', 'error'); }
+  } catch(e) { window.prism.toast('Network error', 'error'); }
 }
 
 // Team
@@ -573,7 +574,7 @@ function hideAddMemberModal() { document.getElementById('addMemberModal').style.
 
 async function addMember() {
   const email = document.getElementById('member-email').value.trim();
-  if (!email) { alert('Email is required'); return; }
+  if (!email) { window.prism.toast('Email is required', 'error'); return; }
   const payload = {
     email, name: document.getElementById('member-name').value.trim(),
     role: document.getElementById('member-role').value,
@@ -583,8 +584,8 @@ async function addMember() {
     const r = await fetch(`/admin/customers/${CUST_ID}/team`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
     const d = await r.json();
     if (r.ok) { window.location.reload(); }
-    else { alert(d.detail || 'Error inviting member'); }
-  } catch(e) { alert('Network error'); }
+    else { window.prism.toast(d.detail || 'Error inviting member', 'error'); }
+  } catch(e) { window.prism.toast('Network error', 'error'); }
 }
 
 async function updateMemberAccess(memberId, level) {
@@ -594,12 +595,13 @@ async function updateMemberAccess(memberId, level) {
 }
 
 async function removeMember(memberId) {
-  if (!confirm('Remove this team member?')) return;
+  const confirmed = await window.prism.confirm({ title: 'Remove team member?', message: 'This member will lose access to the customer account.', confirmLabel: 'Remove', danger: true });
+  if (!confirmed) return;
   try {
     const r = await fetch(`/admin/customers/${CUST_ID}/team/${memberId}`, { method:'DELETE' });
-    if (r.ok) { document.getElementById('member-row-' + memberId)?.remove(); }
-    else { alert('Error removing member'); }
-  } catch(e) { alert('Network error'); }
+    if (r.ok) { document.getElementById('member-row-' + memberId)?.remove(); window.prism.toast('Member removed', 'success'); }
+    else { window.prism.toast('Error removing member', 'error'); }
+  } catch(e) { window.prism.toast('Network error', 'error'); }
 }
 
 // Integrations

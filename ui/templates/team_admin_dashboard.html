@@ -185,7 +185,11 @@
 document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('.team-remove-btn').forEach(function (btn) {
     btn.addEventListener('click', async function () {
-      if (!confirm('Remove "' + btn.dataset.uname + '" from this project?')) return;
+      const ok = await window.prism.confirm({
+        title: 'Remove Team Member',
+        message: 'Remove "' + btn.dataset.uname + '" from this project?'
+      });
+      if (!ok) return;
 
       const r = await fetch('/api/team-admin/remove-user', {
         method: 'POST',
@@ -197,7 +201,7 @@ document.addEventListener('DOMContentLoaded', function () {
         location.reload();
       } else {
         const d = await r.json();
-        alert(d.error || 'Error removing team member');
+        await window.prism.alert({ title: 'PrismAI', message: d.error || 'Error removing team member' });
       }
     });
   });
@@ -206,7 +210,7 @@ document.addEventListener('DOMContentLoaded', function () {
 async function switchProject(projectId) {
   projectId = projectId || document.getElementById('projectSelector').value;
   if (!projectId) {
-    alert('Please choose a project.');
+    await window.prism.alert({ title: 'PrismAI', message: 'Please choose a project.' });
     return;
   }
 
@@ -222,7 +226,7 @@ async function switchProject(projectId) {
     }
     window.location.assign('/team-admin/dashboard?project_id=' + encodeURIComponent(projectId) + '&ts=' + Date.now());
   } catch (err) {
-    alert(err.message);
+    await window.prism.alert({ title: 'PrismAI', message: err.message });
   }
 }
 </script>

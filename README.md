@@ -701,6 +701,29 @@ Schema is auto-created by `init_database()` on startup. Column migrations for ne
 
 ---
 
+## Documentation Deliverables
+
+The curated documentation pack is under [`docs/`](docs/). It is designed for technical and non-technical readers and is generated from the verified Prism implementation plus local incident evidence.
+
+| Deliverable | Purpose |
+|-------------|---------|
+| [`Prism_High_Level_Design.docx`](docs/Prism_High_Level_Design.docx) | Layman-friendly editable Word High-Level Design, including architecture, workflow, capabilities, technology stack, security model, and product boundaries. |
+| [`Prism_Project_Overview.pptx`](docs/Prism_Project_Overview.pptx) | Professional presentation for stakeholder and technical project walkthroughs. |
+| [`Medium_Blog_Draft.md`](docs/Medium_Blog_Draft.md) | Publication-ready Medium draft: *From Telemetry to a Human-Approved Pull Request: Building Prism*. |
+| [`LinkedIn_Announcement.md`](docs/LinkedIn_Announcement.md) | Short LinkedIn announcement with a placeholder for the published Medium URL. |
+| [`screenshots/`](docs/screenshots/) | Numbered architecture, workflow, and verified local-incident visuals, with a capture inventory and external-access boundary. |
+| [`incident-evidence/NTTD6XI2/`](docs/incident-evidence/NTTD6XI2/) | Self-contained incident evidence pack: real locally generated RCA PDF, patch, sanitized metadata, RCA summary, and workflow evidence. |
+
+### Evidence and Screenshot Boundary
+
+The evidence pack uses the local Prism record `NTTD6XI2`, which records a successful end-to-end post-approval workflow and references Jira `SCRUM-12`, GitHub PR `#61`, and a GitHub commit. It intentionally does **not** claim authenticated capture of third-party GitHub, Jira, or Slack pages. Those systems require valid credentials and must be verified in their respective environments before using them as production evidence.
+
+To regenerate documentation after source or local incident changes:
+
+```bash
+python docs/generate_documentation.py
+```
+
 ## Scripts
 
 Operational scripts in `scripts/`. Run all from the **project root**:

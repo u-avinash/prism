@@ -39,6 +39,29 @@ from agents.state import AgentState, WORKFLOW_TOTAL_STEPS
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Critical DB fields — loss of these causes silent state corruption
+# ---------------------------------------------------------------------------
+
+#: Fields whose persistence failure represents a data-loss risk for the
+#: incident's integrity.  When an update that touches any of these fields fails,
+#: the helper logs at ERROR level (vs. WARNING for non-critical fields) so that
+#: on-call engineers can detect and remediate the inconsistency.
+CRITICAL_DB_FIELDS: frozenset[str] = frozenset(
+    {
+        "approval_status",
+        "pr_url",
+        "pr_number",
+        "jira_ticket_key",
+        "jira_ticket_url",
+        "patch_path",
+        "commit_sha",
+        "commit_url",
+        "workflow_lease_token",
+        "workflow_lease_acquired_at",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Workflow step tracking helper
@@ -181,9 +204,20 @@ def update_incident_db(incident_id: str, **kwargs: Any) -> None:
             repo = IncidentRepository(session)
             repo.update(incident_id=incident_id, **kwargs)
     except Exception as exc:
-        logger.warning(
-            "Failed to persist DB update for incident %s (%s): %s",
-            incident_id,
-            list(kwargs.keys()),
-            exc,
-        )
+        failed_fields = list(kwargs.keys())
+        critical_failed = [f for f in failed_fields if f in CRITICAL_DB_FIELDS]
+        if critical_failed:
+            logger.error(
+                "[DB-CRITICAL] Failed to persist critical state field(s) %s "
+                "for incident %s — manual remediation may be required. Error: %s",
+                critical_failed,
+                incident_id,
+                exc,
+            )
+        else:
+            logger.warning(
+                "Failed to persist DB update for incident %s (%s): %s",
+                incident_id,
+                failed_fields,
+                exc,
+            )

@@ -607,7 +607,7 @@ class LLMProvider:
             raise ValueError(f"Empty response from {provider_name}/{model_name}")
         return response_text
 
-    @retry_with_backoff(max_retries=3, base_delay=2.0, exceptions=(RateLimitError, ConnectionError))
+    @retry_with_backoff(max_retries=3, base_delay=15.0, max_delay=120.0, exceptions=(RateLimitError, ConnectionError))
     def invoke(
         self,
         prompt: str,

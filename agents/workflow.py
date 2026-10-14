@@ -44,6 +44,7 @@ from agents.nodes.jira_creator import (
     update_jira_with_branch,
     update_jira_with_commit,
     update_jira_with_pr,
+    update_jira_description_with_github_links,
 )
 from agents.nodes.pr_creator import create_pr_node
 from storage.models import Severity
@@ -127,8 +128,11 @@ def _make_retryable_node(node_fn, node_name: str, max_retries: int = 2, retry_de
                             incident_id=state["incident_id"],
                             current_workflow_node=f"{node_name}_retry_{attempt}",
                         )
-                except Exception:
-                    pass
+                except Exception as _db_retry_err:
+                    logger.debug(
+                        "[Workflow Retry] Failed to persist retry-status for incident %s: %s",
+                        state.get("incident_id"), _db_retry_err,
+                    )
 
             result_state = node_fn(state)
 
@@ -172,8 +176,11 @@ def _make_retryable_node(node_fn, node_name: str, max_retries: int = 2, retry_de
                             incident_id=result_state["incident_id"],
                             current_workflow_node=f"{node_name}_retrying",
                         )
-                except Exception:
-                    pass
+                except Exception as _db_retrying_err:
+                    logger.debug(
+                        "[Workflow Retry] Failed to persist retrying-marker for incident %s: %s",
+                        result_state.get("incident_id"), _db_retrying_err,
+                    )
 
                 _record_workflow_step_event(
                     result_state,
@@ -385,6 +392,7 @@ def _send_event_notification(
     details: str,
     jira_url: Optional[str] = None,
     project_id: Optional[str] = None,
+    pr_url: Optional[str] = None,
 ) -> None:
     """Send a Slack/Teams notification for a specific workflow event (best-effort).
 
@@ -411,6 +419,7 @@ def _send_event_notification(
             severity=severity,
             incident_id=incident_id,
             jira_url=jira_url,
+            pr_url=pr_url,
         )
 
         slack_sent = "slack" in channels_sent
@@ -499,6 +508,7 @@ def send_notifications_node(state: AgentState) -> AgentState:
             severity=severity,
             incident_id=incident_id,
             jira_url=state.get("jira_ticket_url"),
+            pr_url=state.get("pr_url"),
         )
 
         notification_status: dict = {
@@ -553,29 +563,66 @@ def send_notifications_node(state: AgentState) -> AgentState:
 
 def create_jira_and_pr_node(state: AgentState) -> AgentState:
     """Create Jira ticket, attach patch, create PR, and update Jira."""
-    # Step 1: Create Jira ticket
-    state = cast(AgentState, create_jira_ticket(state))
+    # Step 1: Create Jira ticket — skip if one already exists in state.
+    # On post-approval re-runs the state is reconstructed from the DB and
+    # may already carry a jira_ticket_key.  Creating a second ticket would
+    # orphan the original ticket (SCRUM-7 etc.) and direct all subsequent
+    # DevInfo / description-update calls to the newly-created duplicate,
+    # leaving the original ticket's Development panel permanently empty.
+    if state.get("jira_ticket_key"):
+        logger.info(
+            "create_jira_and_pr_node: Jira ticket %s already exists for incident %s — "
+            "skipping ticket creation",
+            state["jira_ticket_key"],
+            state.get("incident_id"),
+        )
+    else:
+        state = cast(AgentState, create_jira_ticket(state))
 
     # Step 2: Attach patch to Jira
     if state.get("jira_ticket_key") and state.get("patch_path"):
         state = cast(AgentState, attach_patch_to_jira(state))
 
-    # Step 3: Create GitHub PR if approved
+    # Step 3: Create GitHub PR if approved — skip if PR already exists.
+    # Same idempotency concern: a previous run may have successfully created
+    # the PR and stored pr_url in the DB.  Re-running create_pr_node would
+    # push a second branch and PR against the same file, causing confusion.
     if state.get("approval_status") == "approved":
-        state = create_pr_node(state)
-
-        if state.get("branch_name"):
-            state = cast(AgentState, update_jira_with_branch(state))
-        if state.get("commit_sha"):
-            state = cast(AgentState, update_jira_with_commit(state))
         if state.get("pr_url"):
-            state = cast(AgentState, update_jira_with_pr(state))
+            logger.info(
+                "create_jira_and_pr_node: PR %s already exists for incident %s — "
+                "skipping PR creation, proceeding to sync",
+                state.get("pr_url"),
+                state.get("incident_id"),
+            )
+        else:
+            state = create_pr_node(state)
 
-        # Step 4: Sync branch / commit / PR into the Jira Development panel.
+            if state.get("branch_name"):
+                state = cast(AgentState, update_jira_with_branch(state))
+            if state.get("commit_sha"):
+                state = cast(AgentState, update_jira_with_commit(state))
+            if state.get("pr_url"):
+                state = cast(AgentState, update_jira_with_pr(state))
+
+        # Step 4: Update the Jira ticket description to include direct GitHub
+        # hyperlinks (branch / commit / PR) so they are visible in the ticket
+        # body without requiring the Jira↔GitHub marketplace app.
+        # Always run — safe to call even when description already has the section
+        # (update_description_with_github_links replaces rather than appends).
+        if state.get("jira_ticket_key") and any([
+            state.get("branch_name"), state.get("commit_sha"), state.get("pr_url")
+        ]):
+            state = cast(AgentState, update_jira_description_with_github_links(state))
+
+        # Step 5: Sync branch / commit / PR into the Jira Development panel.
         # This pushes data via the Jira Software DevInfo API (devinfo/0.10)
         # so that the branch, commit, and PR are visible as clickable links
         # inside the Jira ticket's *Development* section.  Falls back to
         # remote web links when the DevInfo API is unavailable.
+        # Always run — the DevInfo API is idempotent (deduplicates by repo-id +
+        # object-id) so repeated calls are harmless and guarantee the panel is
+        # populated even if an earlier call silently failed.
         if state.get("jira_ticket_key") and state.get("repo_full_name"):
             state = cast(AgentState, sync_jira_development_info(state))
 
@@ -593,6 +640,7 @@ def create_jira_and_pr_node(state: AgentState) -> AgentState:
                 ),
                 jira_url=state.get("jira_ticket_url"),
                 project_id=state.get("project_id"),
+                pr_url=state.get("pr_url"),
             )
 
     # Notify about Jira ticket creation
@@ -758,6 +806,61 @@ def _run_post_approval_workflow_unlocked(
         _app_name,
         _environment,
     )
+
+    # If fetched_code was never stored (e.g. GitHub wasn't configured when the
+    # incident first ran, or the code-fetch step was skipped), attempt a live
+    # fetch now so that fixed_file_content can be reconstructed for PR creation.
+    if not _fetched_code and _repo_full_name and _error_file_path:
+        logger.info(
+            "[Post-Approval] fetched_code is empty — attempting live GitHub fetch "
+            "for incident %s (repo=%s file=%s)",
+            incident_id, _repo_full_name, _error_file_path,
+        )
+        try:
+            from utils.code_fetcher import CodeFetcher
+
+            _code_fetcher = CodeFetcher(project_id=resolved_project_id)
+            _fetch_result = _code_fetcher.fetch_code_for_analysis(
+                repo_full_name=_repo_full_name,
+                file_path=_error_file_path,
+                line_number=_error_line_number,
+            )
+            if _fetch_result and _fetch_result.get("full_content"):
+                _fetched_code = _fetch_result["full_content"]
+                # Use the resolved path in case the fetcher normalised it
+                _error_file_path = _fetch_result.get("file_path", _error_file_path)
+                logger.info(
+                    "[Post-Approval] Live fetch succeeded for incident %s (%d chars, path=%s)",
+                    incident_id, len(_fetched_code), _error_file_path,
+                )
+                # Persist so future re-runs don't need to fetch again
+                try:
+                    from storage.database import get_session as _gs
+                    from storage.incident_repository import IncidentRepository as _IR
+
+                    with _gs() as _s:
+                        _IR(_s).update(
+                            incident_id=incident_id,
+                            fetched_code=_fetched_code,
+                            error_file_path=_error_file_path,
+                        )
+                except Exception as _db_persist_err:
+                    logger.warning(
+                        "[Post-Approval] Failed to persist live-fetched code to DB "
+                        "for incident %s: %s",
+                        incident_id, _db_persist_err,
+                    )
+            else:
+                logger.warning(
+                    "[Post-Approval] Live GitHub fetch returned no content for "
+                    "incident %s (repo=%s file=%s) — PR creation will be skipped",
+                    incident_id, _repo_full_name, _error_file_path,
+                )
+        except Exception as _live_fetch_exc:
+            logger.warning(
+                "[Post-Approval] Live GitHub fetch failed for incident %s: %s",
+                incident_id, _live_fetch_exc,
+            )
 
     fixed_file_content = None
     if _fetched_code and _proposed_fix:

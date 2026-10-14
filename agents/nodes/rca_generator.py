@@ -89,18 +89,62 @@ def generate_rca_node(state: AgentState) -> AgentState:
                     logger.info(f"[RCA Generation] ✓ Found repo in metadata: {repo_full_name}")
             
             # Validate: metadata value must look like "org/repo", not just an org name.
-            # If it contains no slash it is likely the org/user only — discard and resolve properly.
+            # If it contains no slash it is a bare repo name (e.g. OTLP sends just
+            # "order-processing-service" without the org prefix).
+            # Resolution strategy:
+            #   1. If the org is configured → directly build "{org}/{bare_name}" (fast path).
+            #   2. If the bare name equals the org itself → discard it (it is not a repo name).
+            #   3. No org configured → fall through to extract_repo_from_log.
             if repo_full_name and '/' not in repo_full_name:
-                logger.warning(
-                    "[RCA Generation] Metadata repo '%s' has no slash (looks like org-only); "
-                    "falling through to extract_repo_from_log",
-                    repo_full_name,
-                )
-                repo_full_name = None
+                bare_name = repo_full_name
+                repo_full_name = None  # reset; will be set below
 
-            # Fallback to log parsing / DB mapping if metadata didn't give a full org/repo
+                if github_client.org and bare_name.lower() == github_client.org.lower():
+                    # The metadata value IS the org name itself — not a repo name.
+                    logger.warning(
+                        "[RCA Generation] Metadata repo '%s' matches configured org name — "
+                        "not a valid repo name; falling back to app_name resolution",
+                        bare_name,
+                    )
+                elif github_client.org:
+                    # Standard case: OTLP sends bare repo name, org is configured.
+                    # Directly prepend the configured org — no extra API round-trips needed.
+                    repo_full_name = f"{github_client.org}/{bare_name}"
+                    logger.info(
+                        "[RCA Generation] ✓ Bare metadata repo name '%s' + configured org '%s' "
+                        "→ %s",
+                        bare_name, github_client.org, repo_full_name,
+                    )
+                else:
+                    # Org not configured — try to resolve via extract_repo_from_log.
+                    logger.info(
+                        "[RCA Generation] Org not configured; resolving bare repo name '%s' "
+                        "via extract_repo_from_log",
+                        bare_name,
+                    )
+                    try:
+                        repo_full_name = github_client.extract_repo_from_log(
+                            state.get('raw_log', ''),
+                            bare_name,
+                        )
+                        logger.info(
+                            "[RCA Generation] ✓ Bare metadata repo name '%s' resolved → %s",
+                            bare_name, repo_full_name,
+                        )
+                    except ValueError as resolve_err:
+                        logger.warning(
+                            "[RCA Generation] Could not resolve bare metadata repo name '%s': %s",
+                            bare_name, resolve_err,
+                        )
+                        repo_full_name = None
+
+            # Fallback: if metadata gave no usable repo, resolve via app_name
             if not repo_full_name:
                 app_name = state.get('app_name', '')
+                logger.info(
+                    "[RCA Generation] No repo from metadata — resolving via app_name='%s'",
+                    app_name,
+                )
                 try:
                     repo_full_name = github_client.extract_repo_from_log(
                         state.get('raw_log', ''),
@@ -110,11 +154,58 @@ def generate_rca_node(state: AgentState) -> AgentState:
                     logger.warning("[RCA Generation] Could not resolve repo: %s", resolve_err)
                     repo_full_name = None
             
-            # Store repo name in STATE immediately (critical for next nodes!)
+            # Verify candidates before persisting or using them. GitHub returns
+            # 404 for private repositories a token cannot access, so a
+            # syntactically valid telemetry value must not override the
+            # registered application's canonical repository mapping.
             if repo_full_name:
-                state['repo_full_name'] = repo_full_name
-                logger.info(f"[RCA Generation] ✓ Stored repo in STATE: {repo_full_name}")
-            
+                accessible_repo = github_client.get_accessible_repo_full_name(repo_full_name)
+                if not accessible_repo:
+                    app_name = state.get('app_name', '')
+                    logger.warning(
+                        "[RCA Generation] Telemetry-derived repository '%s' is not "
+                        "accessible; falling back to registered application '%s'.",
+                        repo_full_name,
+                        app_name,
+                    )
+                    try:
+                        fallback_repo = github_client.extract_repo_from_log(
+                            "",
+                            app_name,
+                        )
+                        accessible_repo = github_client.get_accessible_repo_full_name(
+                            fallback_repo
+                        )
+                    except ValueError as resolve_err:
+                        logger.warning(
+                            "[RCA Generation] Registered application fallback failed: %s",
+                            resolve_err,
+                        )
+
+                if accessible_repo:
+                    repo_full_name = accessible_repo
+                    state['repo_full_name'] = repo_full_name
+                    logger.info(
+                        "[RCA Generation] ✓ Verified and stored repo in STATE: %s",
+                        repo_full_name,
+                    )
+                else:
+                    configuration_message = (
+                        "GitHub repository is not accessible. Configure the registered "
+                        f"application '{state.get('app_name', '')}' with an accessible "
+                        "owner/repository value and grant the project GitHub token "
+                        "repository Contents: Read access."
+                    )
+                    logger.warning(
+                        "[RCA Generation] %s Candidate: %s",
+                        configuration_message,
+                        repo_full_name,
+                    )
+                    state['messages'] = state.get('messages', []) + [
+                        f"⚠️ {configuration_message}"
+                    ]
+                    repo_full_name = None
+
             if repo_full_name and file_info.get('file_path'):
                 logger.info(f"[RCA Generation] Fetching code from {repo_full_name}/{file_info['file_path']}")
                 try:

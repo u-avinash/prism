@@ -65,6 +65,17 @@
     </div>
   </div>
 
+  <div class="card analytics-chart-card">
+    <div class="card-header">
+      <h2 class="card-title">Request volume & success rate by API</h2>
+    </div>
+    <div class="card-body">
+      <div class="analytics-chart-wrap">
+        <canvas id="apiRequestsChart" height="110" role="img" aria-label="Request volume and success rate chart"></canvas>
+      </div>
+    </div>
+  </div>
+
   <div class="analytics-layout">
     <div class="card">
       <div class="card-header">
@@ -126,10 +137,16 @@
         </div>
         <div class="card-body">
           <div class="analytics-highlight-list">
+            {% set max_hits = (policy_hotspots | map(attribute='policy_hits') | list | max) if policy_hotspots else 1 %}
             {% for item in policy_hotspots %}
             <div class="analytics-highlight">
-              <strong>{{ item.api_name }}</strong>
-              <span>{{ item.policy_hits }} hits · {{ item.environment }}</span>
+              <div class="analytics-highlight__top">
+                <strong>{{ item.api_name }}</strong>
+                <span>{{ item.policy_hits }} hits · {{ item.environment }}</span>
+              </div>
+              <div class="analytics-highlight__bar">
+                <div class="analytics-highlight__bar-fill" style="width: {{ (item.policy_hits / max_hits * 100) if max_hits else 0 }}%;"></div>
+              </div>
             </div>
             {% endfor %}
           </div>
@@ -186,9 +203,18 @@
     gap: .75rem;
   }
 
+  .analytics-chart-card .card-body {
+    padding-top: .25rem;
+  }
+
+  .analytics-chart-wrap {
+    position: relative;
+    height: 280px;
+  }
+
   .analytics-highlight {
     display: flex;
-    justify-content: space-between;
+    flex-direction: column;
     gap: .5rem;
     font-size: .92rem;
     border: 1px solid var(--border, #e5e7eb);
@@ -196,9 +222,28 @@
     padding: .75rem .85rem;
   }
 
+  .analytics-highlight__top {
+    display: flex;
+    justify-content: space-between;
+    gap: .5rem;
+  }
+
   .analytics-highlight span {
     color: var(--text-muted, #6b7280);
     text-align: right;
+  }
+
+  .analytics-highlight__bar {
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.22);
+    overflow: hidden;
+  }
+
+  .analytics-highlight__bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #f59e0b, #ef4444);
   }
 
   @media (max-width: 1024px) {
@@ -211,12 +256,12 @@
     }
   }
 
-  @media (max-width: 640px) {
+    @media (max-width: 640px) {
     .analytics-stats-grid {
       grid-template-columns: 1fr;
     }
 
-    .analytics-highlight {
+    .analytics-highlight__top {
       flex-direction: column;
     }
 
@@ -230,6 +275,75 @@
 
 {% block extra_js %}
 <script>
+  (function initApiRequestsChart() {
+    const canvas = document.getElementById('apiRequestsChart');
+    if (!canvas || typeof Chart === 'undefined') return;
+
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.06)';
+    const textColor = isDark ? '#cbd5e1' : '#475569';
+
+    const labels = [{% for api in analytics_rows %}{{ api.api_name | tojson }},{% endfor %}];
+    const requests = [{% for api in analytics_rows %}{{ api.requests }},{% endfor %}];
+    const successRates = [{% for api in analytics_rows %}{{ api.success_rate }},{% endfor %}];
+
+    new Chart(canvas.getContext('2d'), {
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            type: 'bar',
+            label: 'Requests',
+            data: requests,
+            backgroundColor: 'rgba(124, 58, 237, 0.55)',
+            borderRadius: 6,
+            yAxisID: 'y'
+          },
+          {
+            type: 'line',
+            label: 'Success %',
+            data: successRates,
+            borderColor: '#22c55e',
+            backgroundColor: '#22c55e',
+            tension: 0.35,
+            pointRadius: 3,
+            yAxisID: 'y1'
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: { ticks: { color: textColor, font: { size: 11 } }, grid: { display: false } },
+          y: {
+            position: 'left',
+            ticks: { color: textColor, font: { size: 11 } },
+            grid: { color: gridColor }
+          },
+          y1: {
+            position: 'right',
+            min: 0,
+            max: 100,
+            ticks: { color: textColor, font: { size: 11 }, callback: (v) => v + '%' },
+            grid: { display: false }
+          }
+        },
+        plugins: {
+          legend: { position: 'bottom', labels: { color: textColor, boxWidth: 10, font: { size: 11, weight: '600' } } },
+          tooltip: {
+            backgroundColor: isDark ? '#1e293b' : '#fff',
+            titleColor: textColor,
+            bodyColor: textColor,
+            borderColor: gridColor,
+            borderWidth: 1
+          }
+        }
+      }
+    });
+  })();
+
   (function() {
     const envFilter = document.getElementById('analyticsEnvFilter');
     const rows = Array.from(document.querySelectorAll('.analytics-row'));

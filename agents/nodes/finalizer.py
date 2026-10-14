@@ -290,21 +290,30 @@ def finalize_node(state: AgentState) -> AgentState:
                 error_title = state.get('error_title', 'Unknown Error')
                 jira_url = state.get('jira_ticket_url')
 
-                message = (
-                    f"*Application:* {app_name}\n"
-                    f"*Environment:* {environment}\n"
-                    f"*Status:* {final_status}\n\n"
-                    f"*Error:* {error_title}\n\n"
-                    f"*RCA Available:* {'Yes' if state.get('rca_text') else 'No'}\n"
-                    f"*Fix Generated:* {'Yes' if state.get('proposed_fix') else 'No'}"
-                )
+                pr_url = state.get('pr_url')
+                message_parts = [
+                    f"*Application:* {app_name}",
+                    f"*Environment:* {environment}",
+                    f"*Status:* {final_status}",
+                    "",
+                    f"*Error:* {error_title}",
+                    "",
+                    f"*RCA Available:* {'Yes' if state.get('rca_text') else 'No'}",
+                    f"*Fix Generated:* {'Yes' if state.get('proposed_fix') else 'No'}",
+                ]
+                if state.get('jira_ticket_key'):
+                    message_parts.append(f"*Jira:* {state.get('jira_ticket_key')}")
+                if pr_url:
+                    message_parts.append(f"*PR:* {pr_url}")
+                message = "\n".join(message_parts)
 
                 channels = notifier.send_alert(
                     title=f"Incident #{state['incident_id']} - {app_name}",
                     message=message,
                     severity=severity,
-                    incident_id=None,
-                    jira_url=jira_url
+                    incident_id=state['incident_id'],
+                    jira_url=jira_url,
+                    pr_url=pr_url,
                 )
 
                 if 'slack' in channels:

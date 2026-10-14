@@ -301,37 +301,149 @@ def _fmt_dt(dt) -> str:
 
 
 def _extract_two_code_blocks(text: str) -> Optional[tuple]:
-    code_blocks = re.findall(r"```(?:\w+)?\n(.*?)\n```", text or "", re.DOTALL)
+    # Broader pattern: handles language tags with hyphens, dots, spaces after fence
+    code_blocks = re.findall(r"```[^\n`]*\n(.*?)\n```", text or "", re.DOTALL)
     if len(code_blocks) < 2:
         return None
     return code_blocks[0].strip(), code_blocks[1].strip()
 
 
-def _build_diff_rows(proposed_fix: str) -> Optional[list]:
-    """Return list of (old_ln, new_ln, sign, text) for diff rendering."""
-    blocks = _extract_two_code_blocks(proposed_fix)
-    if not blocks:
-        return None
-    original, fixed = blocks
-    a_lines = original.splitlines()
-    b_lines = fixed.splitlines()
-    sm = difflib.SequenceMatcher(a=a_lines, b=b_lines)
-    rows = []
-    a_ln = b_ln = 1
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal":
-            a_ln += i2 - i1
-            b_ln += j2 - j1
-            continue
-        if tag in ("replace", "delete"):
-            for k in range(i1, i2):
-                rows.append((a_ln, None, "-", html_module.escape(a_lines[k])))
-                a_ln += 1
-        if tag in ("replace", "insert"):
-            for k in range(j1, j2):
-                rows.append((None, b_ln, "+", html_module.escape(b_lines[k])))
-                b_ln += 1
+def _extract_first_code_block(text: str) -> Optional[str]:
+    """Extract the content of the first fenced code block from markdown text."""
+    match = re.search(r"```[^\n`]*\n(.*?)\n```", text or "", re.DOTALL)
+    return match.group(1).strip() if match else None
+
+
+def _format_diff_range(start: int, stop: int) -> str:
+    """Format a unified-diff range (e.g. ``7`` or ``7,3``)."""
+    count = stop - start
+    return str(start + 1) if count == 1 else f"{start + 1},{count}"
+
+
+def _compute_diff_rows(original: str, fixed: str, context_lines: int = 2) -> Optional[list]:
+    """Build GitHub-style unified-diff rows with real hunk headers and line pairs."""
+    original_lines = original.splitlines()
+    fixed_lines = fixed.splitlines()
+    matcher = difflib.SequenceMatcher(None, original_lines, fixed_lines, autojunk=False)
+    rows: list[dict[str, Any]] = []
+
+    for group in matcher.get_grouped_opcodes(n=context_lines):
+        first_old_start = group[0][1]
+        first_new_start = group[0][3]
+        last_old_stop = group[-1][2]
+        last_new_stop = group[-1][4]
+        rows.append(
+            {
+                "kind": "hunk",
+                "old_line": None,
+                "new_line": None,
+                "text": (
+                    f"@@ -{_format_diff_range(first_old_start, last_old_stop)} "
+                    f"+{_format_diff_range(first_new_start, last_new_stop)} @@"
+                ),
+                "blank": False,
+            }
+        )
+
+        for tag, old_start, old_stop, new_start, new_stop in group:
+            if tag == "equal":
+                for offset, text in enumerate(original_lines[old_start:old_stop]):
+                    rows.append(
+                        {
+                            "kind": "context",
+                            "old_line": old_start + offset + 1,
+                            "new_line": new_start + offset + 1,
+                            "text": text,
+                            "blank": not text.strip(),
+                        }
+                    )
+            elif tag == "delete":
+                for offset, text in enumerate(original_lines[old_start:old_stop]):
+                    rows.append(
+                        {
+                            "kind": "remove",
+                            "old_line": old_start + offset + 1,
+                            "new_line": None,
+                            "text": text,
+                            "blank": False,
+                        }
+                    )
+            elif tag == "insert":
+                for offset, text in enumerate(fixed_lines[new_start:new_stop]):
+                    rows.append(
+                        {
+                            "kind": "add",
+                            "old_line": None,
+                            "new_line": new_start + offset + 1,
+                            "text": text,
+                            "blank": False,
+                        }
+                    )
+            elif tag == "replace":
+                # Build remove and add rows separately, then interleave them
+                # sorted by line position so each removed line appears alongside
+                # its replacement rather than all removes followed by all adds.
+                remove_rows = [
+                    {
+                        "kind": "remove",
+                        "old_line": old_start + offset + 1,
+                        "new_line": None,
+                        "text": text,
+                        "blank": False,
+                    }
+                    for offset, text in enumerate(original_lines[old_start:old_stop])
+                ]
+                add_rows = [
+                    {
+                        "kind": "add",
+                        "old_line": None,
+                        "new_line": new_start + offset + 1,
+                        "text": text,
+                        "blank": False,
+                    }
+                    for offset, text in enumerate(fixed_lines[new_start:new_stop])
+                ]
+                # Interleave: for each position emit the remove (if present)
+                # then the add (if present), covering unequal-length blocks.
+                for i in range(max(len(remove_rows), len(add_rows))):
+                    if i < len(remove_rows):
+                        rows.append(remove_rows[i])
+                    if i < len(add_rows):
+                        rows.append(add_rows[i])
+
     return rows or None
+
+
+def _build_diff_rows(proposed_fix: str, original_code: Optional[str] = None) -> Optional[list]:
+    """Return GitHub-style diff rows for the available original/fixed code.
+
+    Strategy 1 – LLM two-block format:
+        The fix generator instructs the LLM to emit an *Original Code* block
+        followed by a *Fixed Code* block.  Extract both and diff them.
+
+    Strategy 2 – fetched original vs extracted fix block:
+        When the LLM only emitted one code block (fallback / conceptual path),
+        compare the original file content stored in ``fetched_code`` against
+        the single fixed block extracted from ``proposed_fix``.
+    """
+    # ── Strategy 1 ──────────────────────────────────────────────────────────
+    blocks = _extract_two_code_blocks(proposed_fix)
+    if blocks:
+        original, fixed = blocks
+        if original.strip() != fixed.strip():
+            rows = _compute_diff_rows(original, fixed)
+            if rows:
+                return rows
+
+    # ── Strategy 2 ──────────────────────────────────────────────────────────
+    if original_code and original_code.strip():
+        fixed_block = _extract_first_code_block(proposed_fix)
+        if fixed_block and fixed_block.strip() != original_code.strip():
+            rows = _compute_diff_rows(original_code.strip(), fixed_block)
+            if rows:
+                return rows
+
+    return None
 
 
 def _build_artifact_info(path_value: Optional[str], kind: str, incident_id: str) -> Optional[dict]:
@@ -998,17 +1110,75 @@ def _verified_integration_response(
     integration_type: str,
     payload: dict[str, Any],
     message: str,
+    extra: Optional[dict[str, Any]] = None,
 ) -> JSONResponse:
-    return JSONResponse(
-        {
-            "success": True,
-            "message": message,
-            "verification_token": _issue_verification_receipt(
-                request, project_id, integration_type, payload
-            ),
-        },
-        status_code=200,
+    body: dict[str, Any] = {
+        "success": True,
+        "message": message,
+        "verification_token": _issue_verification_receipt(
+            request, project_id, integration_type, payload
+        ),
+    }
+    if extra:
+        body.update(extra)
+    return JSONResponse(body, status_code=200)
+
+
+def _run_prism_context_validation(llm: Any) -> tuple[bool, str]:
+    """Test whether the LLM can handle PRISM's code-analysis / bug-fixing context.
+
+    Sends a structured prompt that mimics a real PRISM workflow (GitHub repo +
+    alert → code fetch → root-cause analysis → patch generation) and validates
+    that the model returns a well-formed JSON response with the required keys.
+    A failure here does NOT block saving – it is advisory only.
+    """
+    import json as _json
+
+    prism_prompt = (
+        "You are PRISM, an AI system that monitors GitHub repositories and automatically fixes code bugs.\n"
+        "An alert fires: 'NullPointerException in OrderService.java at line 42 – "
+        "repository: https://github.com/org/service'.\n\n"
+        "Describe in 2-3 sentences each:\n"
+        "  1. How you would fetch and analyse the relevant code from the GitHub repository.\n"
+        "  2. How you would identify the root cause of the NullPointerException.\n"
+        "  3. How you would generate and propose a code patch to fix the issue.\n\n"
+        "Reply ONLY as valid JSON with exactly these keys:\n"
+        '  "analysis_approach"   – how you fetch and read the code\n'
+        '  "fix_strategy"        – how you identify and fix the bug\n'
+        '  "confidence_level"    – one of: "high", "medium", or "low"\n'
     )
+    response_text: str = ""
+    try:
+        response_text = llm.invoke(
+            prompt=prism_prompt,
+            system_message=(
+                "You are a helpful software engineering assistant specialised in "
+                "automated code analysis, root-cause identification, and patch generation."
+            ),
+            temperature=0.1,
+            json_mode=True,
+        )
+        clean = response_text.strip()
+        # Strip markdown code fences that some models wrap around JSON
+        if clean.startswith("```"):
+            clean = re.sub(r"^```[a-z]*\n?", "", clean, flags=re.MULTILINE)
+            clean = clean.rstrip("`").strip()
+        parsed = _json.loads(clean)
+        required_keys = {"analysis_approach", "fix_strategy", "confidence_level"}
+        if required_keys.issubset(parsed.keys()):
+            return True, _json.dumps(parsed, indent=2)
+        missing = required_keys - set(parsed.keys())
+        return False, (
+            f"PRISM context check: response is missing required keys {missing}.\n"
+            f"Raw response (first 400 chars): {clean[:400]}"
+        )
+    except _json.JSONDecodeError as exc:
+        return False, (
+            f"PRISM context check: model returned non-JSON output – {exc}.\n"
+            f"Raw response (first 400 chars): {response_text[:400]}"
+        )
+    except Exception as exc:
+        return False, f"PRISM context check error: {exc}"
 
 
 def _masked_secret_status(project_config: Optional[dict]) -> dict:
@@ -1924,6 +2094,7 @@ async def team_admin_onboarding_page(request: Request, project_id: str = Query(d
         selected_project = my_projects[0]
 
     config = get_project_config(selected_project["id"], mask_secrets=True) if (_AUTH_AVAILABLE and selected_project) else {}
+    integration_configured = _configured_integrations(config)
     all_users = list_users() if _AUTH_AVAILABLE else []
     team_users = [u for u in all_users if u.get("role") == "user"]
     members = get_project_users(selected_project["id"]) if (selected_project and _AUTH_AVAILABLE) else []
@@ -1936,6 +2107,7 @@ async def team_admin_onboarding_page(request: Request, project_id: str = Query(d
             "projects": my_projects,
             "selected_project": selected_project,
             "integration_config": config,
+            "integration_configured": integration_configured,
             "team_members": members,
             "available_users": available_users,
             "error": None,
@@ -1979,6 +2151,9 @@ async def team_admin_onboarding_post(request: Request):
     if not selected_project and my_projects:
         selected_project = my_projects[0]
     members = get_project_users(selected_project["id"]) if (selected_project and _AUTH_AVAILABLE) else []
+    team_users = [u for u in all_users if u.get("role") == "user"]
+    member_ids = {m.get("id") for m in members}
+    available_users = [u for u in team_users if not selected_project or u.get("id") not in member_ids]
     return templates.TemplateResponse(
         request,
         "team_admin_onboarding.html",
@@ -1988,6 +2163,7 @@ async def team_admin_onboarding_post(request: Request):
             "selected_project": selected_project,
             "integration_config": config,
             "team_members": members,
+            "available_users": available_users,
             "error": error,
             "success": success,
             "page": "team_admin_onboarding",
@@ -2025,17 +2201,21 @@ async def api_team_admin_add_member(request: Request):
 
     try:
         all_users = list_users()
-        existing = next((u for u in all_users if u.get("email", "").lower() == email.lower()), None)
-        if existing:
-            new_user = existing
-        else:
-            new_user = create_user({
-                "username": username,
-                "email": email,
-                "password": password,
-                "role": "user",
-                "full_name": full_name,
-            })
+        by_username = next((u for u in all_users if u.get("username", "").lower() == username.lower()), None)
+        if by_username:
+            return JSONResponse({"error": f"A user with username '{username}' already exists."}, status_code=409)
+        by_email = next((u for u in all_users if u.get("email", "").lower() == email.lower()), None)
+        if by_email:
+            return JSONResponse({"error": f"A user with email '{email}' already exists."}, status_code=409)
+        new_user = create_user({
+            "username": username,
+            "email": email,
+            "password": password,
+            "role": "user",
+            "full_name": full_name,
+        })
+        if not new_user:
+            return JSONResponse({"error": "Failed to create user."}, status_code=500)
         for pid in project_ids:
             if pid:
                 assign_user_to_project(new_user["id"], pid)
@@ -2358,10 +2538,27 @@ async def api_team_admin_save_runtime_config(request: Request):
         return JSONResponse({"error": "Project access denied"}, status_code=403)
 
     description = str(body.get("description") or "").strip()
+    llm_processing_mode = str(body.get("llm_processing_mode") or "").strip().lower()
 
     try:
         update_project(project_id, {"description": description})
-        return JSONResponse({"success": True, "project_id": project_id, "description": description})
+
+        # Persist LLM processing mode (sequential / parallel) when supplied.
+        # Stored in the project's runtime config section so it is readable by
+        # the ingestion API without requiring LLM credentials to be present.
+        if llm_processing_mode in ("sequential", "parallel"):
+            update_project_config(project_id, "runtime", {"llm_processing_mode": llm_processing_mode})
+            logger.info(
+                "[Team Admin] LLM processing mode set to '%s' for project %s",
+                llm_processing_mode, project_id,
+            )
+
+        return JSONResponse({
+            "success": True,
+            "project_id": project_id,
+            "description": description,
+            "llm_processing_mode": llm_processing_mode or "parallel",
+        })
     except Exception as exc:
         logger.error("save-runtime-config error: %s", exc, exc_info=True)
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -2481,8 +2678,22 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                     status_code=status,
                 )
 
+            # PRISM context validation – test whether the model can reason about
+            # code-analysis and bug-fixing scenarios as required by PRISM.
+            prism_ok, prism_detail = _run_prism_context_validation(llm)
+
             return _verified_integration_response(
-                request, project_id, int_type, body, message
+                request,
+                project_id,
+                int_type,
+                body,
+                message,
+                extra={
+                    "prism_validation": {
+                        "ok": prism_ok,
+                        "message": prism_detail,
+                    }
+                },
             )
         except Exception as exc:
             error_message = str(exc)
@@ -2510,14 +2721,35 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
 
         try:
             base_url = validate_https_url(base_url, integration="Jira")
+            _jira_auth = (username, api_token)
+            _jira_headers = {"Accept": "application/json", "Content-Type": "application/json"}
+            # Try Jira Cloud REST API v3 first, then fall back to v2
             response = integration_request(
                 "GET",
-                f"{base_url}/rest/api/2/myself",
-                auth=(username, api_token),
-                headers={"Accept": "application/json"},
+                f"{base_url}/rest/api/3/myself",
+                auth=_jira_auth,
+                headers=_jira_headers,
             )
+            # If v3 myself returns 404, try v2 (Jira Server / older Cloud)
+            if response.status_code == 404:
+                response = integration_request(
+                    "GET",
+                    f"{base_url}/rest/api/2/myself",
+                    auth=_jira_auth,
+                    headers=_jira_headers,
+                )
             if response.status_code == 200:
-                user_data = response.json()
+                try:
+                    user_data = response.json()
+                except Exception:
+                    # 200 but non-JSON body means auth was redirected to a login page
+                    return JSONResponse(
+                        {
+                            "success": False,
+                            "error": "Jira authentication failed. Check URL, username, and API token.",
+                        },
+                        status_code=400,
+                    )
                 display_name = user_data.get("displayName") or user_data.get("name") or username
                 return _verified_integration_response(
                     request,
@@ -2531,11 +2763,80 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                     {"success": False, "error": "Jira authentication failed. Check URL, username, and API token."},
                     status_code=400,
                 )
+            if response.status_code == 404:
+                # Both v3 and v2 returned 404.  On Atlassian Cloud this happens
+                # when the account exists but has no access to this Jira site
+                # (Atlassian returns 404 from /myself rather than 401 in that
+                # case).  Atlassian Cloud also now requires authentication for
+                # the serverInfo endpoint, so probe it with auth first.
+                try:
+                    server_check = integration_request(
+                        "GET",
+                        f"{base_url}/rest/api/3/serverInfo",
+                        auth=_jira_auth,
+                        headers={"Accept": "application/json"},
+                    )
+                    if server_check.status_code == 200:
+                        return JSONResponse(
+                            {
+                                "success": False,
+                                "error": (
+                                    "Jira is reachable but authentication failed. "
+                                    "Please verify your email/username and API token."
+                                ),
+                            },
+                            status_code=400,
+                        )
+                    if server_check.status_code in (401, 403):
+                        return JSONResponse(
+                            {
+                                "success": False,
+                                "error": (
+                                    "Jira authentication failed. "
+                                    "Please verify your email/username and API token."
+                                ),
+                            },
+                            status_code=400,
+                        )
+                except Exception:
+                    pass
+                # Fall back: probe serverInfo without auth (older Jira Server
+                # instances allow unauthenticated access to this endpoint).
+                try:
+                    server_check_anon = integration_request(
+                        "GET",
+                        f"{base_url}/rest/api/3/serverInfo",
+                        headers={"Accept": "application/json"},
+                    )
+                    if server_check_anon.status_code == 200:
+                        return JSONResponse(
+                            {
+                                "success": False,
+                                "error": (
+                                    "Jira is reachable but authentication failed. "
+                                    "Please verify your email/username and API token."
+                                ),
+                            },
+                            status_code=400,
+                        )
+                except Exception:
+                    pass
+                return JSONResponse(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Jira site not found at '{base_url}'. "
+                            "Please verify your Jira Cloud base URL "
+                            "(e.g., https://yourcompany.atlassian.net)."
+                        ),
+                    },
+                    status_code=400,
+                )
             return JSONResponse(
                 {"success": False, "error": f"Jira verification failed with status {response.status_code}."},
                 status_code=400,
             )
-        except requests.SSLError as exc:
+        except requests.exceptions.SSLError as exc:
             return JSONResponse({"success": False, "error": str(connection_error("Jira", exc))}, status_code=400)
         except IntegrationVerificationError as exc:
             return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
@@ -2601,8 +2902,10 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                 {"success": False, "error": f"GitHub verification failed with status {user_response.status_code}."},
                 status_code=400,
             )
-        except requests.SSLError as exc:
+        except requests.exceptions.SSLError as exc:
             return JSONResponse({"success": False, "error": str(connection_error("GitHub", exc))}, status_code=400)
+        except IntegrationVerificationError as exc:
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
         except requests.RequestException as exc:
             return JSONResponse({"success": False, "error": f"Unable to reach GitHub: {exc}"}, status_code=400)
 
@@ -2639,7 +2942,7 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                 },
                 status_code=400,
             )
-        except requests.SSLError as exc:
+        except requests.exceptions.SSLError as exc:
             return JSONResponse({"success": False, "error": str(connection_error("Slack", exc))}, status_code=400)
         except IntegrationVerificationError as exc:
             return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
@@ -2679,7 +2982,7 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
                 },
                 status_code=400,
             )
-        except requests.SSLError as exc:
+        except requests.exceptions.SSLError as exc:
             return JSONResponse({"success": False, "error": str(connection_error("Microsoft Teams", exc))}, status_code=400)
         except IntegrationVerificationError as exc:
             return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
@@ -2687,7 +2990,21 @@ async def api_team_admin_test_integration(int_type: str, request: Request):
             return JSONResponse({"success": False, "error": f"Unable to reach Microsoft Teams: {exc}"}, status_code=400)
 
     label = _type_labels.get(int_type, int_type.upper())
-    return JSONResponse({"success": True, "message": f"{label} connection test succeeded (stub)."})
+    logger.warning(
+        "[Integration Test] Unknown integration type '%s' requested by project %s",
+        int_type,
+        project_id,
+    )
+    return JSONResponse(
+        {
+            "success": False,
+            "error": (
+                f"Integration type '{int_type}' is not supported. "
+                f"Supported types: {', '.join(sorted(_type_labels.keys()))}."
+            ),
+        },
+        status_code=400,
+    )
 
 
 @app.post("/api/team/members", status_code=201)
@@ -2821,6 +3138,28 @@ async def api_team_delete_environment(env_id: str, request: Request):
         return JSONResponse({"success": True})
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/team-admin/available-users")
+async def api_team_admin_available_users(request: Request, project_id: str = Query(default="")):
+    """Return users with role='user' not yet assigned to the specified project."""
+    redir = _require_role(request, "team_admin", "admin")
+    if redir:
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+    if not _AUTH_AVAILABLE:
+        return JSONResponse([], status_code=200)
+    if not project_id or not _can_manage_project(request, project_id):
+        return JSONResponse({"error": "Project access denied"}, status_code=403)
+    all_users = list_users()
+    team_users = [u for u in all_users if u.get("role") == "user"]
+    members = get_project_users(project_id)
+    member_ids = {m.get("id") for m in members}
+    available = [
+        {"id": u["id"], "username": u["username"], "email": u.get("email", "")}
+        for u in team_users
+        if u.get("id") not in member_ids
+    ]
+    return JSONResponse(available)
 
 
 @app.post("/api/team-admin/assign-user")
@@ -3209,8 +3548,9 @@ async def incident_detail(
 
     diff_rows = None
     proposed_fix = getattr(inc, "proposed_fix", None)
+    fetched_code = getattr(inc, "fetched_code", None)
     if isinstance(proposed_fix, str) and proposed_fix:
-        diff_rows = _build_diff_rows(proposed_fix)
+        diff_rows = _build_diff_rows(proposed_fix, original_code=fetched_code or None)
 
     # Workflow steps definition
     # Patch generation now runs BEFORE approval so the reviewer can download
@@ -3277,8 +3617,16 @@ async def incident_detail(
         _inferred_set.add("assess_severity")
         _inferred_set.add("generate_rca")
 
-    # Fix generated → proposed_fix or fix_explanation is populated
-    _has_fix = bool(getattr(inc, "proposed_fix", None) or getattr(inc, "fix_explanation", None))
+    # Fix generated → proposed_fix is populated (not just an error message in fix_explanation)
+    _proposed_fix_val = getattr(inc, "proposed_fix", None)
+    _fix_explanation_val = getattr(inc, "fix_explanation", None) or ""
+    _fix_explanation_is_error = _fix_explanation_val.startswith((
+        "Fix generation failed:",
+        "Error generating fix:",
+    ))
+    _has_fix = bool(_proposed_fix_val) or (
+        bool(_fix_explanation_val) and not _fix_explanation_is_error
+    )
     if _has_fix:
         _inferred_set.add("generate_fix")
 
@@ -3286,7 +3634,7 @@ async def incident_detail(
     if getattr(inc, "pdf_path", None):
         _inferred_set.add("generate_pdf")
 
-    # Quality review (reflect) → runs right after fix generation; infer from fix + quality score
+    # Quality review (reflect) → runs right after fix generation; only infer from a real fix
     if _has_fix:
         _inferred_set.add("reflect")
 
@@ -3787,6 +4135,25 @@ async def api_approve(
         target_id=incident_id,
         details={"has_notes": bool(notes), "rejection_reason_code": rejection_reason_code or None},
     )
+
+    # Trigger the post-approval workflow in a background thread when the fix is approved.
+    # This runs: notifications → Jira creation → PR creation → finalize.
+    # Without this the workflow stalls at APPROVED status and never proceeds to
+    # Jira/PR creation after the human clicks "Approve".
+    if action == "approve":
+        try:
+            from agents.workflow import run_post_approval_workflow
+            _project_id = str((selected_project or {}).get("id") or "") or None
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, run_post_approval_workflow, incident_id, _project_id)
+            logger.info(
+                "[Approval] Post-approval workflow triggered for incident %s", incident_id
+            )
+        except Exception as _wf_exc:
+            logger.error(
+                "[Approval] Failed to trigger post-approval workflow for %s: %s",
+                incident_id, _wf_exc,
+            )
 
     # Notify SSE subscribers
     await _broadcast(

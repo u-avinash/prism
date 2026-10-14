@@ -338,11 +338,7 @@
 {% block extra_js %}
 <script>
 function prismAlert(message) {
-  if (window.Prism && typeof window.Prism.showAlert === 'function') {
-    window.Prism.showAlert('PrismAI', message);
-    return;
-  }
-  window.alert('PrismAI: ' + message);
+  return window.prism.alert({ title: 'PrismAI', message: message });
 }
 
 document.addEventListener('DOMContentLoaded', function () {
@@ -359,7 +355,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
   document.querySelectorAll('.delete-user-btn').forEach(function (btn) {
     btn.addEventListener('click', async function () {
-      if (!confirm('Delete user "' + btn.dataset.name + '"? This cannot be undone.')) return;
+      const confirmed = await window.prism.confirm({ title: 'Delete user?', message: 'Delete user "' + btn.dataset.name + '"? This cannot be undone.', confirmLabel: 'Delete', danger: true });
+      if (!confirmed) return;
       const r = await fetch('/api/admin/users/' + btn.dataset.id, { method: 'DELETE' });
       if (r.ok) {
         location.reload();
@@ -382,7 +379,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
   document.querySelectorAll('.delete-project-btn').forEach(function (btn) {
     btn.addEventListener('click', async function () {
-      if (!confirm('Delete project "' + btn.dataset.name + '"? This cannot be undone.')) return;
+      const confirmed = await window.prism.confirm({ title: 'Delete project?', message: 'Delete project "' + btn.dataset.name + '"? This cannot be undone.', confirmLabel: 'Delete', danger: true });
+      if (!confirmed) return;
       const r = await fetch('/api/admin/projects/' + btn.dataset.id, { method: 'DELETE' });
       if (r.ok) {
         location.reload();

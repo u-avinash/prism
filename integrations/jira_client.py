@@ -22,12 +22,38 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
 from atlassian import Jira
-from atlassian.errors import ApiError
 
-from integrations.verification import request as integration_request
+from integrations.errors import (
+    IntegrationAuthError,
+    IntegrationRateLimitError,
+    IntegrationTimeoutError,
+    IntegrationTransientError,
+    classify_integration_error,
+    is_retryable_integration_error,
+)
+from integrations.verification import request as integration_request, tls_verify_value
 from utils.retry_handler import retry_with_backoff
 
 logger = logging.getLogger(__name__)
+
+_RETRYABLE_JIRA_ERRORS = (
+    IntegrationRateLimitError,
+    IntegrationTimeoutError,
+    IntegrationTransientError,
+)
+
+
+def _handle_jira_error(operation: str, exc: Exception, fallback: Any) -> Any:
+    """Classify a Jira failure; re-raise authentication and retryable errors."""
+    classified = classify_integration_error(
+        "Jira",
+        exc,
+        status_code=getattr(exc, "status_code", None),
+    )
+    logger.error("Jira %s failed (%s): %s", operation, type(classified).__name__, classified)
+    if is_retryable_integration_error(classified) or isinstance(classified, IntegrationAuthError):
+        raise classified from exc
+    return fallback
 
 
 def _utc_now_iso() -> str:
@@ -57,13 +83,17 @@ class JiraClient:
         self.username = (username or project_cfg.get("username") or "").strip()
         self.api_token = (api_token or project_cfg.get("api_token") or "").strip()
         self.jira_project_key = (project_cfg.get("project_key") or "").strip()
+        # Configurable issue type with a sensible default of "Bug".
+        # Override via Team Admin → Project Configuration → Jira → issue_type.
+        self.jira_issue_type = (project_cfg.get("issue_type") or "Bug").strip()
 
-        if not self.url or not self.username or not self.api_token:
+        if not self.url or not self.username or not self.api_token or not self.jira_project_key:
             missing = [
                 field for field, val in (
                     ("Jira URL", self.url),
                     ("username", self.username),
                     ("API token", self.api_token),
+                    ("project key", self.jira_project_key),
                 ) if not val
             ]
             raise ValueError(
@@ -74,11 +104,18 @@ class JiraClient:
             )
 
         try:
+            _verify_ssl = tls_verify_value()
+            if _verify_ssl is False:
+                # Suppress urllib3 InsecureRequestWarning when the administrator
+                # has explicitly opted into unverified TLS (e.g. Zscaler proxy).
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             self.client = Jira(
                 url=self.url,
                 username=self.username,
                 password=self.api_token,
                 cloud=True,
+                verify_ssl=_verify_ssl,
             )
             logger.info("Jira client initialised for %s", self.url)
         except Exception as exc:
@@ -109,7 +146,11 @@ class JiraClient:
 
     # ── Ticket operations ─────────────────────────────────────────────────────
 
-    @retry_with_backoff(max_retries=3, base_delay=1.0)
+    @retry_with_backoff(
+        max_retries=3,
+        base_delay=1.0,
+        exceptions=_RETRYABLE_JIRA_ERRORS,
+    )
     def create_incident_ticket(
         self,
         incident_id: str,
@@ -153,7 +194,7 @@ class JiraClient:
                 f" (Incident #{incident_id})"
             ),
             "description": description,
-            "issuetype": {"name": "Bug"},
+            "issuetype": {"name": self.jira_issue_type},
             "priority": {"name": priority},
             "labels": [
                 "auto-generated",
@@ -175,12 +216,8 @@ class JiraClient:
                 "ticket_id": issue["id"],
                 "ticket_url": ticket_url,
             }
-        except ApiError as exc:
-            logger.error("Jira API error: %s - %s", exc.status_code, exc.reason)
-            return None
         except Exception as exc:
-            logger.error("Failed to create Jira ticket: %s", exc)
-            return None
+            return _handle_jira_error("ticket creation", exc, None)
 
     def _build_ticket_description(
         self,
@@ -224,17 +261,24 @@ class JiraClient:
         ]
         return "\n".join(parts)
 
-    @retry_with_backoff(max_retries=3, base_delay=1.0)
+    @retry_with_backoff(
+        max_retries=3,
+        base_delay=1.0,
+        exceptions=_RETRYABLE_JIRA_ERRORS,
+    )
     def add_comment(self, ticket_key: str, comment: str) -> bool:
         try:
             self.client.issue_add_comment(ticket_key, comment)
             logger.info("Added comment to %s", ticket_key)
             return True
         except Exception as exc:
-            logger.error("Failed to add comment to %s: %s", ticket_key, exc)
-            return False
+            return _handle_jira_error(f"add comment to {ticket_key}", exc, False)
 
-    @retry_with_backoff(max_retries=3, base_delay=1.0)
+    @retry_with_backoff(
+        max_retries=3,
+        base_delay=1.0,
+        exceptions=_RETRYABLE_JIRA_ERRORS,
+    )
     def update_status(self, ticket_key: str, status: str) -> bool:
         try:
             transitions = self.client.get_issue_transitions(ticket_key)
@@ -249,10 +293,8 @@ class JiraClient:
             logger.info("Updated %s status to %s", ticket_key, status)
             return True
         except Exception as exc:
-            logger.error("Failed to update status for %s: %s", ticket_key, exc)
-            return False
+            return _handle_jira_error(f"update status for {ticket_key}", exc, False)
 
-    @retry_with_backoff(max_retries=3, base_delay=1.0)
     def link_to_pr(self, ticket_key: str, pr_url: str) -> bool:
         comment = (
             "h3. Pull Request Created\n\n"
@@ -262,7 +304,6 @@ class JiraClient:
         )
         return self.add_comment(ticket_key, comment)
 
-    @retry_with_backoff(max_retries=3, base_delay=1.0)
     def add_rca_update(
         self,
         ticket_key: str,
@@ -273,7 +314,11 @@ class JiraClient:
         comment = f"h3. Root Cause Analysis{confidence_str}\n\n{rca_text}"
         return self.add_comment(ticket_key, comment)
 
-    @retry_with_backoff(max_retries=3, base_delay=1.0)
+    @retry_with_backoff(
+        max_retries=3,
+        base_delay=1.0,
+        exceptions=_RETRYABLE_JIRA_ERRORS,
+    )
     def get_ticket(self, ticket_key: str) -> Optional[Dict[str, Any]]:
         try:
             issue = self.client.issue(ticket_key)
@@ -289,8 +334,7 @@ class JiraClient:
                 "url": f"{self.url}/browse/{issue['key']}",
             }
         except Exception as exc:
-            logger.error("Failed to get ticket %s: %s", ticket_key, exc)
-            return None
+            return _handle_jira_error(f"get ticket {ticket_key}", exc, None)
 
     def search_incidents(
         self,
@@ -325,6 +369,109 @@ class JiraClient:
             logger.error("Failed to search tickets: %s", exc)
             return []
 
+    # ── Jira ticket description update with GitHub links ─────────────────────
+
+    def update_description_with_github_links(
+        self,
+        ticket_key: str,
+        repo_full_name: Optional[str] = None,
+        branch_name: Optional[str] = None,
+        commit_sha: Optional[str] = None,
+        commit_url: Optional[str] = None,
+        pr_url: Optional[str] = None,
+        pr_number: Optional[int] = None,
+    ) -> bool:
+        """
+        Append a *GitHub Links* section to the existing Jira ticket description.
+
+        Called after PR/branch/commit creation so the ticket body contains
+        direct clickable hyperlinks to every GitHub artefact.  Uses the Jira
+        REST API v2 PUT endpoint so it works on both Jira Cloud and Server.
+
+        Returns True when the description was successfully updated.
+        """
+        if not any([branch_name, commit_sha, pr_url]):
+            logger.debug(
+                "update_description_with_github_links: no GitHub artefacts for %s — skipping",
+                ticket_key,
+            )
+            return False
+
+        try:
+            repo_url = f"https://github.com/{repo_full_name}" if repo_full_name else ""
+            _gh_marker = "h2. GitHub Links"
+
+            # Build the GitHub links section using Jira Wiki Markup
+            github_parts: list = ["", "----", _gh_marker]
+            if branch_name and repo_url:
+                github_parts.append(
+                    f"*Fix Branch:* [{branch_name}|{repo_url}/tree/{branch_name}]"
+                )
+            if commit_sha:
+                short_sha = str(commit_sha)[:7]
+                if commit_url:
+                    github_parts.append(f"*Commit:* [{short_sha}|{commit_url}]")
+                else:
+                    github_parts.append(f"*Commit:* {short_sha}")
+            if pr_url and pr_number:
+                github_parts.append(f"*Pull Request:* [PR #{pr_number}|{pr_url}]")
+            elif pr_url:
+                github_parts.append(f"*Pull Request:* [View PR|{pr_url}]")
+            if repo_url and repo_full_name:
+                github_parts.append(f"*Repository:* [{repo_full_name}|{repo_url}]")
+
+            github_section = "\n".join(github_parts)
+
+            # Fetch the current description so we can append (or replace the section)
+            try:
+                issue = self.client.issue(ticket_key)
+                current_desc: str = (
+                    (issue.get("fields") or {}).get("description") or ""
+                )
+            except Exception as _fetch_exc:
+                logger.warning(
+                    "update_description_with_github_links: could not fetch description "
+                    "for %s: %s — will append fresh section",
+                    ticket_key, _fetch_exc,
+                )
+                current_desc = ""
+
+            # If a previous GitHub Links section exists, replace it; otherwise append.
+            if _gh_marker in current_desc:
+                new_desc = current_desc[: current_desc.index(_gh_marker)].rstrip()
+                new_desc = new_desc + github_section
+            else:
+                new_desc = current_desc.rstrip() + github_section
+
+            resp = integration_request(
+                "PUT",
+                f"{self.url}/rest/api/2/issue/{ticket_key}",
+                json={"fields": {"description": new_desc}},
+                headers=self._basic_auth_headers(),
+                timeout=15,
+            )
+
+            if resp.status_code in (200, 204):
+                logger.info(
+                    "GitHub links added to Jira ticket %s description "
+                    "(branch=%s commit=%s pr=%s)",
+                    ticket_key, branch_name, commit_sha, pr_number,
+                )
+                return True
+
+            logger.warning(
+                "update_description_with_github_links: Jira API returned %s for %s: %s",
+                resp.status_code, ticket_key, resp.text[:200],
+            )
+            return False
+
+        except Exception as exc:
+            logger.error(
+                "Failed to update description with GitHub links for %s: %s",
+                ticket_key, exc,
+            )
+            return False
+
     # ── Jira Development Information API ─────────────────────────────────────
 
     def sync_development_info(
@@ -345,8 +492,15 @@ class JiraClient:
         Push branch/commit/PR details into the Jira Development panel via
         the Jira Software Development Information API (devinfo/0.10).
 
-        Populates the *Development* panel so developers can navigate directly
-        to the GitHub branch, commit, and PR from inside the Jira ticket.
+        NOTE: On Jira Cloud, the devinfo/0.10/bulk endpoint requires an
+        Atlassian Connect app OAuth token — Basic Auth is NOT accepted and
+        will return 400/401/403.  When that happens this method returns False
+        and sync_all_dev_links() falls back to create_remote_link() which
+        creates clickable "Web Links" on the ticket using the standard REST
+        API (which DOES accept Basic Auth).
+
+        The Development panel in Jira Cloud can only be populated through the
+        GitHub for Jira marketplace app or an equivalent OAuth Connect app.
         """
         try:
             repo_parts = repo_full_name.split("/", 1)
@@ -472,10 +626,23 @@ class JiraClient:
                 )
                 return True
 
-            logger.warning(
-                "Jira Dev Info API returned %s for ticket %s: %s",
-                resp.status_code, ticket_key, resp.text[:300],
-            )
+            # 400/401/403 on Jira Cloud = devinfo API requires OAuth Connect app,
+            # not Basic Auth.  Log at INFO (not WARNING) so the operator knows
+            # this is expected without the GitHub for Jira marketplace app.
+            if resp.status_code in (400, 401, 403):
+                logger.info(
+                    "Jira Dev Info API returned %s for ticket %s — "
+                    "devinfo/0.10/bulk requires an Atlassian Connect OAuth app "
+                    "(not Basic Auth). The Development panel can only be populated "
+                    "via the GitHub for Jira marketplace app. "
+                    "Falling back to remote web links.",
+                    resp.status_code, ticket_key,
+                )
+            else:
+                logger.warning(
+                    "Jira Dev Info API returned %s for ticket %s: %s",
+                    resp.status_code, ticket_key, resp.text[:300],
+                )
             return False
 
         except Exception as exc:
@@ -499,6 +666,10 @@ class JiraClient:
         Remote links appear under the *Web links* section of the ticket and
         provide clickable navigation to branches, commits, and PRs even when
         the Jira↔GitHub marketplace app is not installed.
+
+        Uses integration_request directly (with Basic Auth) instead of the
+        Atlassian library's .post() method to avoid silent failures and ensure
+        proper Content-Type / Accept headers are sent.
         """
         try:
             link_payload: dict = {
@@ -515,12 +686,24 @@ class JiraClient:
             if tooltip:
                 link_payload["object"]["summary"] = tooltip
 
-            self.client.post(
-                f"rest/api/3/issue/{ticket_key}/remotelink",
-                data=link_payload,
+            # Use integration_request (not self.client.post) so we get
+            # consistent TLS handling, proper JSON headers, and a real
+            # HTTP response object to inspect for success/failure.
+            resp = integration_request(
+                "POST",
+                f"{self.url}/rest/api/3/issue/{ticket_key}/remotelink",
+                json=link_payload,
+                headers=self._basic_auth_headers(),
+                timeout=15,
             )
-            logger.info("Remote link added to %s: %s", ticket_key, title)
-            return True
+            if resp.status_code in (200, 201):
+                logger.info("Remote link added to %s: %s", ticket_key, title)
+                return True
+            logger.warning(
+                "Remote link POST returned %s for %s (%s): %s",
+                resp.status_code, ticket_key, title, resp.text[:200],
+            )
+            return False
         except Exception as exc:
             logger.warning(
                 "Failed to add remote link to %s (%s): %s", ticket_key, title, exc
@@ -542,10 +725,12 @@ class JiraClient:
         base_branch: str = "main",
     ) -> Dict[str, bool]:
         """
-        Convenience wrapper that calls sync_development_info() first (Dev panel),
-        then falls back to create_remote_link() for each artefact so that links
-        are always visible on the ticket regardless of whether the Jira↔GitHub
-        marketplace app is installed.
+        Convenience wrapper that attempts the Jira Software DevInfo API first
+        (populates the Development panel — requires GitHub for Jira marketplace
+        app / OAuth Connect app), then ALWAYS creates remote web links via the
+        standard REST API (Basic Auth accepted) so that branch, commit, and PR
+        URLs are always visible as clickable links on the ticket regardless of
+        whether the marketplace app is installed.
 
         Returns a dict with keys "dev_info", "branch_link", "commit_link",
         "pr_link" mapped to True/False depending on success.
@@ -557,7 +742,11 @@ class JiraClient:
             "pr_link": False,
         }
 
-        # Primary: push to Development panel via DevInfo API
+        # Attempt 1: push to Development panel via DevInfo API.
+        # Will succeed only when the GitHub for Jira marketplace app (or an
+        # equivalent Atlassian Connect OAuth app) is installed and authorised.
+        # On Jira Cloud with Basic Auth this returns 400/401/403 — that is
+        # expected and logged at INFO level; we always proceed to the fallback.
         results["dev_info"] = self.sync_development_info(
             ticket_key=ticket_key,
             repo_full_name=repo_full_name,
@@ -572,7 +761,10 @@ class JiraClient:
             base_branch=base_branch,
         )
 
-        # Secondary: remote web links (visible even without the GitHub app)
+        # Attempt 2: ALWAYS create remote web links via /rest/api/3/issue/remotelink
+        # (standard Jira REST API, Basic Auth accepted on both Jira Cloud and Server).
+        # These appear under "Web Links" on the ticket and are fully clickable even
+        # without the GitHub marketplace app.
         repo_url = f"https://github.com/{repo_full_name}"
 
         if branch_name:
@@ -598,6 +790,15 @@ class JiraClient:
                 ticket_key=ticket_key,
                 url=pr_url,
                 title=f"PR #{pr_number}: {pr_title or 'Auto-Fix'}",
+                tooltip=f"Pull request fixing {ticket_key}",
+                relationship="implemented in",
+            )
+        elif pr_url:
+            # pr_number may be absent in some edge cases — still create the link
+            results["pr_link"] = self.create_remote_link(
+                ticket_key=ticket_key,
+                url=pr_url,
+                title="Pull Request: Auto-Fix",
                 tooltip=f"Pull request fixing {ticket_key}",
                 relationship="implemented in",
             )

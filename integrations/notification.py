@@ -71,8 +71,6 @@ class NotificationClient:
                 "slack_channel": slack_cfg.get("channel", ""),
                 "teams_webhook_url": teams_cfg.get("webhook_url", ""),
                 "email": config.get("email") or {},
-                # Outbound generic webhooks: list of {url, label, events: [...]}
-                # events filter (optional): e.g. ["fix_approved", "incident_created"]
                 "outbound_webhooks": config.get("outbound_webhooks") or [],
             }
         except Exception as exc:
@@ -83,7 +81,7 @@ class NotificationClient:
 
     @staticmethod
     def _build_deep_link(incident_id: Optional[Union[int, str]]) -> Optional[str]:
-        if not incident_id:
+        if incident_id is None or str(incident_id).strip() in ("", "N/A", "0", "None"):
             return None
         try:
             from config.settings import get_settings as _gs
@@ -107,7 +105,7 @@ class NotificationClient:
         ))
         if not diff:
             return None
-        return "\n".join(diff[:max_lines]) + ("\n…" if len(diff) > max_lines else "")
+        return "\n".join(diff[:max_lines]) + ("\n..." if len(diff) > max_lines else "")
 
     # ── Public send interface ─────────────────────────────────────────────────
 
@@ -121,6 +119,7 @@ class NotificationClient:
         jira_url: Optional[str] = None,
         proposed_fix: Optional[str] = None,
         event: Optional[str] = None,
+        pr_url: Optional[str] = None,
     ) -> List[str]:
         """
         Send an alert to the specified channels (or all configured channels).
@@ -129,6 +128,7 @@ class NotificationClient:
         Channels that are not configured for the project are silently skipped.
 
         `event` is used to filter outbound webhooks by their `events` allowlist.
+        `pr_url` is the GitHub Pull Request URL included as an action button/link.
         """
         if channels is None:
             channels = []
@@ -141,27 +141,27 @@ class NotificationClient:
             if self.outbound_webhooks:
                 channels.append("outbound")
 
-        successful: list[str] = []
+        successful: list = []
         for channel in channels:
             try:
                 if channel == "slack" and self.slack_webhook:
-                    self._send_slack(title, message, severity, incident_id, jira_url, proposed_fix)
+                    self._send_slack(title, message, severity, incident_id, jira_url, proposed_fix, pr_url)
                     successful.append("slack")
                     logger.info("Alert sent to Slack (project=%s)", self.project_id)
 
                 elif channel == "teams" and self.teams_webhook:
-                    self._send_teams(title, message, severity, incident_id, jira_url, proposed_fix)
+                    self._send_teams(title, message, severity, incident_id, jira_url, proposed_fix, pr_url)
                     successful.append("teams")
                     logger.info("Alert sent to Teams (project=%s)", self.project_id)
 
                 elif channel == "email" and self.email_enabled:
-                    self._send_email(title, message, severity, incident_id, jira_url)
+                    self._send_email(title, message, severity, incident_id, jira_url, pr_url)
                     successful.append("email")
                     logger.info("Alert sent via Email (project=%s)", self.project_id)
 
                 elif channel == "outbound" and self.outbound_webhooks:
                     sent_count = self._send_outbound_webhooks(
-                        title, message, severity, incident_id, jira_url, event
+                        title, message, severity, incident_id, jira_url, event, pr_url
                     )
                     if sent_count > 0:
                         successful.append("outbound")
@@ -182,45 +182,61 @@ class NotificationClient:
         incident_id: Optional[Union[int, str]],
         jira_url: Optional[str],
         proposed_fix: Optional[str] = None,
+        pr_url: Optional[str] = None,
     ) -> None:
         color_map = {"CRITICAL": "#FF0000", "HIGH": "#FF6600", "MEDIUM": "#FFCC00", "LOW": "#36A64F"}
         color = color_map.get(severity, "#808080")
         deep_link = self._build_deep_link(incident_id)
 
-        if deep_link and incident_id not in (None, ""):
-            incident_text = f"*Incident:*\n<{deep_link}|{str(incident_id).strip()} → View →>"
-        elif incident_id not in (None, ""):
-            incident_text = f"*Incident ID:*\n{str(incident_id).strip()}"
+        _inc_id_str = str(incident_id).strip() if incident_id is not None else ""
+        _inc_id_valid = bool(_inc_id_str) and _inc_id_str not in ("N/A", "0", "None")
+        if deep_link and _inc_id_valid:
+            incident_text = "*Incident ID:*\n<" + deep_link + "|" + _inc_id_str + " -> View>"
+        elif _inc_id_valid:
+            incident_text = "*Incident ID:*\n" + _inc_id_str
         else:
             incident_text = "*Incident ID:*\nN/A"
 
         blocks = [
-            {"type": "header", "text": {"type": "plain_text", "text": f"🚨 {title}", "emoji": True}},
+            {"type": "header", "text": {"type": "plain_text", "text": "Incident Alert: " + title, "emoji": True}},
             {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Severity:*\n{severity}"},
+                {"type": "mrkdwn", "text": "*Severity:*\n" + severity},
                 {"type": "mrkdwn", "text": incident_text},
             ]},
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Details:*\n{message[:400]}"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "*Details:*\n" + message[:400]}},
         ]
 
         diff_snippet = self._extract_diff_snippet(proposed_fix)
         if diff_snippet:
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Code Change:*\n```{diff_snippet[:700]}```"},
+                "text": {"type": "mrkdwn", "text": "*Code Change:*\n```" + diff_snippet[:700] + "```"},
             })
 
-        actions: list[dict] = []
+        actions = []
         if deep_link:
-            actions.append({"type": "button", "text": {"type": "plain_text", "text": "View Incident →"},
-                            "url": deep_link, "style": "primary"})
+            actions.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "View Incident"},
+                "url": deep_link,
+                "style": "primary",
+            })
         if jira_url:
-            actions.append({"type": "button", "text": {"type": "plain_text", "text": "Open Jira ↗"},
-                            "url": jira_url})
+            actions.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Open Jira"},
+                "url": jira_url,
+            })
+        if pr_url:
+            actions.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "View PR on GitHub"},
+                "url": pr_url,
+            })
         if actions:
             blocks.append({"type": "actions", "elements": actions})
 
-        payload: dict = {"attachments": [{"color": color, "blocks": blocks}]}
+        payload = {"attachments": [{"color": color, "blocks": blocks}]}
         response = integration_request("POST", self.slack_webhook, json=payload, timeout=10)
         response.raise_for_status()
 
@@ -235,18 +251,30 @@ class NotificationClient:
         incident_id: Optional[Union[int, str]],
         jira_url: Optional[str],
         proposed_fix: Optional[str] = None,
+        pr_url: Optional[str] = None,
     ) -> None:
         color_map = {"CRITICAL": "FF0000", "HIGH": "FF6600", "MEDIUM": "FFCC00", "LOW": "36A64F"}
         theme_color = color_map.get(severity, "808080")
         deep_link = self._build_deep_link(incident_id)
-        id_value = str(incident_id).strip() if incident_id not in (None, "") else "N/A"
 
-        sections: list[dict] = [{
-            "activityTitle": "🚨 Error Alert",
-            "facts": [
-                {"name": "Severity", "value": severity},
-                {"name": "Incident ID", "value": id_value},
-            ],
+        # Build a clean incident ID — never show "N/A" when a real ID was provided.
+        _inc_id_str = str(incident_id).strip() if incident_id is not None else ""
+        _inc_id_valid = bool(_inc_id_str) and _inc_id_str not in ("N/A", "0", "None")
+        id_value = _inc_id_str if _inc_id_valid else "N/A"
+
+        facts = [
+            {"name": "Severity", "value": severity},
+            {"name": "Incident ID", "value": id_value},
+        ]
+        if jira_url:
+            jira_key = jira_url.rstrip("/").split("/")[-1]
+            facts.append({"name": "Jira Ticket", "value": jira_key + " - " + jira_url})
+        if pr_url:
+            facts.append({"name": "Pull Request", "value": pr_url})
+
+        sections = [{
+            "activityTitle": "Error Alert",
+            "facts": facts,
             "text": message[:500],
         }]
 
@@ -254,23 +282,35 @@ class NotificationClient:
         if diff_snippet:
             sections.append({
                 "activityTitle": "Proposed Code Change",
-                "text": f"<pre>{diff_snippet[:700]}</pre>",
+                "text": "<pre>" + diff_snippet[:700] + "</pre>",
             })
 
-        actions: list[dict] = []
+        actions = []
         if deep_link:
-            actions.append({"@type": "OpenUri", "name": "View Incident →",
-                            "targets": [{"os": "default", "uri": deep_link}]})
+            actions.append({
+                "@type": "OpenUri",
+                "name": "View Incident",
+                "targets": [{"os": "default", "uri": deep_link}],
+            })
         if jira_url:
-            actions.append({"@type": "OpenUri", "name": "Open Jira ↗",
-                            "targets": [{"os": "default", "uri": jira_url}]})
+            actions.append({
+                "@type": "OpenUri",
+                "name": "Open Jira",
+                "targets": [{"os": "default", "uri": jira_url}],
+            })
+        if pr_url:
+            actions.append({
+                "@type": "OpenUri",
+                "name": "View PR on GitHub",
+                "targets": [{"os": "default", "uri": pr_url}],
+            })
 
-        card: dict = {
+        card = {
             "@type": "MessageCard",
             "@context": "https://schema.org/extensions",
             "summary": title,
             "themeColor": theme_color,
-            "title": f"🚨 {title}",
+            "title": "Incident Alert: " + title,
             "sections": sections,
         }
         if actions:
@@ -289,6 +329,7 @@ class NotificationClient:
         incident_id: Optional[Union[int, str]],
         jira_url: Optional[str],
         event: Optional[str] = None,
+        pr_url: Optional[str] = None,
     ) -> int:
         """
         Deliver a standardised JSON event to all configured outbound webhook URLs.
@@ -299,18 +340,6 @@ class NotificationClient:
 
         When `events` is specified, only matching event types are delivered.
         Returns the number of webhooks that succeeded.
-
-        Payload shape (Zapier / Make / n8n compatible):
-        {
-          "event":        "fix_approved",
-          "incident_id":  "A7CB",
-          "title":        "...",
-          "severity":     "HIGH",
-          "message":      "...",
-          "jira_url":     "...",
-          "incident_url": "http://localhost:8080/incidents/A7CB",
-          "timestamp":    "2026-06-18T12:00:00Z"
-        }
         """
         if not self.outbound_webhooks:
             return 0
@@ -323,6 +352,7 @@ class NotificationClient:
             "severity": severity,
             "message": message[:800],
             "jira_url": jira_url,
+            "pr_url": pr_url,
             "incident_url": deep_link,
             "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "project_id": self.project_id,
@@ -343,7 +373,6 @@ class NotificationClient:
                 if not url:
                     continue
 
-                # Event filter check
                 if allowed_events and event and event not in allowed_events:
                     logger.debug("[Outbound] Skipping webhook %s — event '%s' not in allowed %s",
                                  url[:40], event, allowed_events)
@@ -370,42 +399,41 @@ class NotificationClient:
         severity: str,
         incident_id: Optional[Union[int, str]],
         jira_url: Optional[str],
+        pr_url: Optional[str] = None,
     ) -> None:
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"[{severity}] {title}"
+        msg["Subject"] = "[" + severity + "] " + title
         msg["From"] = self.email_config["from_email"]
         msg["To"] = self.email_config["to_email"]
 
         id_display = str(incident_id).strip() if incident_id not in (None, "") else "N/A"
         color = "red" if severity in ("CRITICAL", "HIGH") else "orange"
-        jira_link = f'<p><a href="{jira_url}" style="color:#0052CC;">View Jira Ticket</a></p>' if jira_url else ""
+        jira_link = ('<p><a href="' + jira_url + '" style="color:#0052CC;">View Jira Ticket</a></p>'
+                     if jira_url else "")
+        pr_link = ('<p><a href="' + pr_url + '" style="color:#24292e;">View Pull Request on GitHub</a></p>'
+                   if pr_url else "")
         deep_link = self._build_deep_link(incident_id)
         incident_link = (
-            f'<p><a href="{deep_link}" style="color:#6366f1;">View Incident in Prism →</a></p>'
+            '<p><a href="' + deep_link + '" style="color:#6366f1;">View Incident in Prism</a></p>'
             if deep_link else ""
         )
 
-        html_body = f"""
-        <html>
-          <body style="font-family:Arial,sans-serif;">
-            <h2 style="color:#333;">🚨 Error Alert: {title}</h2>
-            <table style="border-collapse:collapse;margin:20px 0;">
-              <tr>
-                <td style="padding:8px;font-weight:bold;">Severity:</td>
-                <td style="padding:8px;color:{color};">{severity}</td>
-              </tr>
-              <tr>
-                <td style="padding:8px;font-weight:bold;">Incident ID:</td>
-                <td style="padding:8px;">{id_display}</td>
-              </tr>
-            </table>
-            <h3>Error Details:</h3>
-            <pre style="background:#f5f5f5;padding:15px;border-radius:5px;overflow-x:auto;">{message}</pre>
-            {jira_link}
-            {incident_link}
-          </body>
-        </html>
-        """
+        html_body = (
+            "<html><body style=\"font-family:Arial,sans-serif;\">"
+            "<h2 style=\"color:#333;\">Error Alert: " + title + "</h2>"
+            "<table style=\"border-collapse:collapse;margin:20px 0;\">"
+            "<tr><td style=\"padding:8px;font-weight:bold;\">Severity:</td>"
+            "<td style=\"padding:8px;color:" + color + ";\">" + severity + "</td></tr>"
+            "<tr><td style=\"padding:8px;font-weight:bold;\">Incident ID:</td>"
+            "<td style=\"padding:8px;\">" + id_display + "</td></tr>"
+            "</table>"
+            "<h3>Error Details:</h3>"
+            "<pre style=\"background:#f5f5f5;padding:15px;border-radius:5px;overflow-x:auto;\">"
+            + message +
+            "</pre>"
+            + jira_link + pr_link + incident_link +
+            "</body></html>"
+        )
         msg.attach(MIMEText(html_body, "html"))
 
         with smtplib.SMTP(self.email_config["smtp_host"], self.email_config["smtp_port"]) as server:
@@ -425,12 +453,13 @@ def send_slack_alert(
     app_name: Optional[str] = None,
     environment: Optional[str] = None,
     project_id: Optional[str] = None,
+    pr_url: Optional[str] = None,
 ) -> bool:
     """Send a Slack alert for a project. Returns True if delivered."""
     try:
-        full_title = f"[{app_name}] {title}" if app_name else title
+        full_title = ("[" + app_name + "] " + title) if app_name else title
         if environment:
-            full_title = f"{full_title} ({environment})"
+            full_title = full_title + " (" + environment + ")"
         client = NotificationClient(project_id=project_id)
         successful = client.send_alert(
             title=full_title,
@@ -439,6 +468,7 @@ def send_slack_alert(
             severity=severity,
             incident_id=incident_id,
             jira_url=jira_url,
+            pr_url=pr_url,
         )
         return "slack" in successful
     except Exception as exc:
@@ -455,12 +485,13 @@ def send_teams_alert(
     app_name: Optional[str] = None,
     environment: Optional[str] = None,
     project_id: Optional[str] = None,
+    pr_url: Optional[str] = None,
 ) -> bool:
     """Send a Teams alert for a project. Returns True if delivered."""
     try:
-        full_title = f"[{app_name}] {title}" if app_name else title
+        full_title = ("[" + app_name + "] " + title) if app_name else title
         if environment:
-            full_title = f"{full_title} ({environment})"
+            full_title = full_title + " (" + environment + ")"
         client = NotificationClient(project_id=project_id)
         successful = client.send_alert(
             title=full_title,
@@ -469,6 +500,7 @@ def send_teams_alert(
             severity=severity,
             incident_id=incident_id,
             jira_url=jira_url,
+            pr_url=pr_url,
         )
         return "teams" in successful
     except Exception as exc:
@@ -484,6 +516,7 @@ def send_outbound_webhook_event(
     severity: str = "HIGH",
     jira_url: Optional[str] = None,
     project_id: Optional[str] = None,
+    pr_url: Optional[str] = None,
 ) -> bool:
     """Fire a specific named event to all configured outbound webhooks. Returns True if any delivered."""
     try:
@@ -496,6 +529,7 @@ def send_outbound_webhook_event(
             incident_id=incident_id,
             jira_url=jira_url,
             event=event,
+            pr_url=pr_url,
         )
         return "outbound" in successful
     except Exception as exc:

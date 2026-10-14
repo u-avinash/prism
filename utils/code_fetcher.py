@@ -97,20 +97,41 @@ class CodeFetcher:
             ]
 
             if not matches:
-                logger.warning("Repository tree search found no match for filename: %s", filename)
+                logger.warning(
+                    "[Code Fetch] Repository tree search found no match for '%s' in repo '%s'",
+                    filename, repo_full_name,
+                )
                 return None
 
             for prefix in preferred_prefixes:
                 for match in matches:
                     if match.startswith(prefix):
-                        logger.info("Repository tree search matched preferred path: %s", match)
+                        logger.info(
+                            "[Code Fetch] Repository tree search matched preferred path: %s",
+                            match,
+                        )
                         return match
 
-            logger.info("Repository tree search matched path: %s", matches[0])
+            logger.info(
+                "[Code Fetch] Repository tree search matched path: %s", matches[0]
+            )
             return matches[0]
 
         except Exception as exc:
-            logger.warning("Repository tree search failed for %s/%s: %s", repo_full_name, filename, exc)
+            # Distinguish repo-not-found (404) from other errors so callers
+            # can surface a more actionable message.
+            from github import GithubException
+            if isinstance(exc, GithubException) and exc.status == 404:
+                logger.warning(
+                    "[Code Fetch] Repository not found (or token lacks access) for '%s' "
+                    "while searching for file '%s': %s",
+                    repo_full_name, filename, exc,
+                )
+            else:
+                logger.warning(
+                    "[Code Fetch] Repository tree search failed for repo '%s', file '%s': %s",
+                    repo_full_name, filename, exc,
+                )
             return None
 
     def fetch_mulesoft_project_context(self, repo_full_name: str) -> Dict[str, str]:

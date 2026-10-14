@@ -79,7 +79,7 @@ def create_pr_node(state: AgentState) -> AgentState:
             "bug": "bug",
             "feature": "feature",
             "request": "request",
-            "story": "story",
+            "story": "bug",
             "task": "task",
             "epic": "epic",
         }
@@ -254,10 +254,30 @@ Before merging this PR, please verify:
             
             logger.info(f"[PR Creation] Success for incident {incident_id}: PR #{pr_info['pr_number']}")
         else:
-            logger.warning(f"[PR Creation] Failed to create PR for incident {incident_id}")
+            pr_error_msg = (
+                "GitHub PR creation failed — the GitHub API returned no result. "
+                "Check: (1) GitHub token has 'repo' scope, (2) repository exists and is accessible, "
+                "(3) branch name is valid, (4) fixed file content was generated successfully."
+            )
+            logger.error(f"[PR Creation] Failed to create PR for incident {incident_id}: {pr_error_msg}")
+            state['jira_error'] = (state.get('jira_error') or '') + f" | PR Error: {pr_error_msg}"
             state['messages'] = state.get('messages', []) + [
-                "⚠️ GitHub PR creation failed - check credentials and permissions"
+                f"❌ GitHub PR creation failed — {pr_error_msg}"
             ]
+            # Persist PR failure to DB so the UI can surface it
+            try:
+                from storage.database import get_session
+                from storage.incident_repository import IncidentRepository
+
+                with get_session() as session:
+                    repo = IncidentRepository(session)
+                    repo.update(
+                        incident_id=incident_id,
+                        current_workflow_node='create_pr_failed',
+                        jira_error=state.get('jira_error'),
+                    )
+            except Exception as db_error:
+                logger.warning(f"Failed to persist PR failure to DB: {db_error}")
     
     except Exception as e:
         logger.error(f"[PR Creation] Failed for incident {state['incident_id']}: {str(e)}")

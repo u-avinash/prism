@@ -84,7 +84,11 @@ def create_jira_ticket(state: AgentState) -> Dict[str, Any]:
             # Update state with ticket info
             state["jira_ticket_key"] = ticket_info["ticket_key"]
             state["jira_ticket_url"] = ticket_info["ticket_url"]
-            state["jira_issue_type"] = "Bug"
+            # Use the ACTUAL configured issue type (from project Jira config),
+            # not a hardcoded value — pr_creator.py maps this to the branch
+            # prefix (bug/, story/, task/, etc.) and a mismatch here would
+            # produce a branch prefix that doesn't match the real Jira issue type.
+            state["jira_issue_type"] = jira_client.jira_issue_type
             state["jira_error"] = None  # Clear any previous errors
 
             # Update workflow tracking
@@ -388,6 +392,84 @@ Please review at your earliest convenience."""
     except Exception as e:
         logger.error(f"Error updating Jira with PR: {str(e)}")
         return state
+
+
+def update_jira_description_with_github_links(state: AgentState) -> Dict[str, Any]:
+    """
+    Update the Jira ticket description to include direct GitHub hyperlinks.
+
+    Appends a *GitHub Links* section to the ticket body so that branch,
+    commit, and PR URLs are visible as clickable links inside the Jira ticket
+    without requiring the Jira↔GitHub marketplace app to be installed.
+
+    Args:
+        state: Current agent state containing jira_ticket_key and GitHub artefact URLs.
+
+    Returns:
+        Updated state with result logged in messages.
+    """
+    logger.info(
+        "Updating Jira ticket description with GitHub links for incident %s",
+        state.get("incident_id"),
+    )
+
+    ticket_key = state.get("jira_ticket_key")
+    if not ticket_key:
+        logger.debug("update_jira_description_with_github_links: no Jira ticket key, skipping")
+        return state
+
+    branch_name = state.get("branch_name") or state.get("fix_branch")
+    commit_sha = state.get("commit_sha")
+    commit_url = state.get("commit_url")
+    pr_url = state.get("pr_url")
+    pr_number = state.get("pr_number")
+    repo_full_name = state.get("repo_full_name")
+
+    if not any([branch_name, commit_sha, pr_url]):
+        logger.debug(
+            "update_jira_description_with_github_links: no GitHub artefacts for %s, skipping",
+            ticket_key,
+        )
+        return state
+
+    try:
+        try:
+            jira_client = JiraClient(project_id=state.get("project_id"))
+        except ValueError as cfg_err:
+            logger.warning("Jira not configured, skipping description update: %s", cfg_err)
+            return state
+
+        ok = jira_client.update_description_with_github_links(
+            ticket_key=ticket_key,
+            repo_full_name=repo_full_name,
+            branch_name=branch_name,
+            commit_sha=commit_sha,
+            commit_url=commit_url,
+            pr_url=pr_url,
+            pr_number=pr_number,
+        )
+
+        if ok:
+            msg = (
+                f"✓ GitHub links added to Jira {ticket_key} description "
+                f"(branch={branch_name}, pr={pr_number or pr_url})"
+            )
+        else:
+            msg = (
+                f"⚠️ Could not update Jira {ticket_key} description with GitHub links "
+                f"— check Jira API permissions."
+            )
+
+        state["messages"] = state.get("messages", []) + [msg]
+        logger.info(msg)
+
+    except Exception as exc:
+        logger.error(
+            "Error in update_jira_description_with_github_links for incident %s: %s",
+            state.get("incident_id"), exc,
+        )
+
+    return state
 
 
 def sync_jira_development_info(state: AgentState) -> Dict[str, Any]:

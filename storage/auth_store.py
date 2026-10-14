@@ -43,7 +43,11 @@ from storage.database import (
     get_session as get_db_session,
     init_database,
 )
-from utils.secret_crypto import decrypt_secret, encrypt_secret
+import logging
+
+from utils.secret_crypto import SecretDecryptionError, decrypt_secret, encrypt_secret
+
+logger = logging.getLogger(__name__)
 
 # ── Storage path ────────────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -163,12 +167,41 @@ def _encrypt_section(section: str, values: dict) -> dict:
     return encrypted
 
 
-def _decrypt_section(section: str, values: dict | None) -> dict:
+def _decrypt_section(section: str, values: dict | None, project_id: str | None = None) -> dict:
+    """
+    Decrypt the secret fields of a persisted config section.
+
+    If a value cannot be decrypted (e.g., INTEGRATION_SECRET_KEY was rotated
+    without re-encrypting stored data, or the ciphertext is corrupted), the
+    field is surfaced as None with a `<key>_decryption_error` flag rather than
+    silently falling back to the raw ciphertext or an empty value. This lets
+    callers (and the UI) distinguish "not configured" from "misconfigured
+    encryption key" and a security audit event is recorded so administrators
+    are alerted.
+    """
     secret_fields = _SECRET_FIELDS.get(section, set())
     decrypted: dict = {}
     for key, value in (values or {}).items():
         if key in secret_fields and value not in (None, ""):
-            decrypted[key] = decrypt_secret(value)
+            try:
+                decrypted[key] = decrypt_secret(value)
+            except SecretDecryptionError:
+                logger.error(
+                    "Decryption failed for %s.%s (project_id=%s). Treating as "
+                    "unavailable rather than falling back to unconfigured state.",
+                    section, key, project_id,
+                )
+                decrypted[key] = None
+                decrypted[f"{key}_decryption_error"] = True
+                record_security_audit_event(
+                    "secret.decryption_failed",
+                    project_id=project_id,
+                    actor_type="system",
+                    target_type="integration_config",
+                    target_id=section,
+                    outcome="failure",
+                    details={"field": key},
+                )
         else:
             decrypted[key] = value
     return decrypted
@@ -193,7 +226,7 @@ def _load_db_project_config(project_id: str, mask_secrets: bool = False) -> Opti
 
         cfg = _default_project_config(project_id)
         for section in _DB_CONFIG_SECTIONS:
-            section_data = _decrypt_section(section, getattr(row, section) or {})
+            section_data = _decrypt_section(section, getattr(row, section) or {}, project_id=project_id)
             cfg[section] = _mask_section_for_ui(section, section_data) if mask_secrets else section_data
         cfg["teams_notif"] = dict(cfg["teams"])
         return cfg
@@ -211,7 +244,9 @@ def _save_db_project_config(project_id: str, section: str, values: dict) -> dict
             session.add(row)
             session.flush()
 
-        current_values = _decrypt_section(normalized_section, getattr(row, normalized_section) or {})
+        current_values = _decrypt_section(
+            normalized_section, getattr(row, normalized_section) or {}, project_id=project_id
+        )
         merged_values = dict(current_values)
 
         for key, value in (values or {}).items():
@@ -411,6 +446,7 @@ def create_user(payload: dict) -> dict:
         "id": "USR-" + _new_id(),
         "username": username,
         "email": email,
+        "full_name": (payload.get("full_name") or "").strip(),
         "password_hash": _hash_password(payload.get("password", "changeme")),
         "role": role,
         "features": default_features,
@@ -689,8 +725,9 @@ def get_project_users(project_id: str) -> list:
     """Return list of users assigned to a project."""
     data = _load()
     _ensure_keys(data)
-    user_ids = {a["user_id"] for a in data["project_assignments"] if a["project_id"] == project_id}
-    return [u for u in data["users"] if u["id"] in user_ids]
+    pid = str(project_id)
+    user_ids = {str(a["user_id"]) for a in data["project_assignments"] if str(a.get("project_id", "")) == pid}
+    return [u for u in data["users"] if str(u["id"]) in user_ids]
 
 
 # ════════════════════════════════════════════════════════════════════════════

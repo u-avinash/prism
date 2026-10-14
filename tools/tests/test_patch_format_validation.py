@@ -21,12 +21,18 @@ Ensures that generated patch files have proper formatting for Anypoint Studio,
 git apply, and standard patch tools.
 """
 import sys
+import tempfile
 from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from agents.nodes.patch_generator import _validate_patch_format
+from agents.nodes.patch_generator import (
+    _apply_targeted_fix,
+    _validate_patch_format,
+    generate_patch_file_node,
+)
+from config.settings import get_settings
 
 
 def test_valid_patch_format():
@@ -108,6 +114,68 @@ def test_real_world_mule_patch():
     print("[PASS] Real-world MuleSoft patch test passed")
 
 
+def test_patch_generator_accepts_hyphenated_fence_label():
+    """The generator and UI must accept realistic labels such as ``mule-xml``."""
+    original = "<flow name=\"orders\">\n    <logger message=\"old\"/>\n</flow>\n"
+    proposed_fix = """**Original Code**
+```mule-xml
+<flow name="orders">
+    <logger message="old"/>
+</flow>
+```
+
+**Fixed Code**
+```mule-xml
+<flow name="orders">
+    <logger message="new"/>
+</flow>
+```"""
+
+    fixed = _apply_targeted_fix(original, proposed_fix, {"incident_id": "TEST"})
+    assert fixed is not None
+    assert 'message="new"' in fixed
+    print("[PASS] Hyphenated fenced-code label test passed")
+
+
+def test_generated_patch_contains_only_unified_diff():
+    """Generated artifacts must remain directly consumable by ``git apply``."""
+    original_output_dir = get_settings().patch_output_dir
+    original = "first line\nsecond line\n"
+    proposed_fix = """**Original Code**
+```text
+first line
+second line
+```
+
+**Fixed Code**
+```text
+first line
+updated line
+```"""
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        get_settings().patch_output_dir = temp_dir
+        state = {
+            "incident_id": "TST1",
+            "proposed_fix": proposed_fix,
+            "original_code": original,
+            "error_file_path": "sample.txt",
+            "fix_explanation": "Update the sample.",
+            "messages": [],
+        }
+        result = generate_patch_file_node(state)
+        patch_path = Path(result["patch_path"])
+        patch_content = patch_path.read_text(encoding="utf-8")
+
+        assert patch_content.startswith("--- sample.txt\n+++ sample.txt\n")
+        assert "# Patch Information" not in patch_content
+        assert "Update the sample." not in patch_content
+        assert _validate_patch_format(patch_content)
+
+    get_settings().patch_output_dir = original_output_dir
+    print("[PASS] Pure unified-diff patch generation test passed")
+
+
 def test_patch_with_metadata():
     """Test that a patch with metadata section is still valid."""
     patch_with_metadata = """--- a/src/main/mule/test.xml
@@ -143,6 +211,8 @@ def main():
         test_empty_patch()
         test_patch_with_no_diff_markers()
         test_real_world_mule_patch()
+        test_patch_generator_accepts_hyphenated_fence_label()
+        test_generated_patch_contains_only_unified_diff()
         test_patch_with_metadata()
         
         print("\n" + "="*60)
